@@ -83,12 +83,11 @@ pub fn callback_url(raw: &str) -> Result<url::Url> {
             "Callback must be an HTTPS URL on port 443 without credentials or fragment",
         ));
     }
-    if let Some(host) = url.host_str() {
-        if let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>() {
-            if !public_ip(ip) {
-                return Err(Error("Callback is not publicly routable"));
-            }
-        }
+    if let Some(host) = url.host_str()
+        && let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>()
+        && !public_ip(ip)
+    {
+        return Err(Error("Callback is not publicly routable"));
     }
     Ok(url)
 }

@@ -21,6 +21,17 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+type DeliveryCall = (Vec<(String, String)>, Vec<u8>);
+type TestSetup = (
+    tempfile::TempDir,
+    Settings,
+    Db,
+    Arc<Auth>,
+    Arc<Mail>,
+    Arc<Receiver>,
+    Arc<Events>,
+);
+
 #[derive(Default)]
 struct Mail {
     state: Mutex<BTreeMap<String, (u32, u32)>>,
@@ -65,7 +76,7 @@ impl Source for Mail {
 }
 #[derive(Default)]
 struct Receiver {
-    calls: Mutex<Vec<(Vec<(String, String)>, Vec<u8>)>>,
+    calls: Mutex<Vec<DeliveryCall>>,
     statuses: Mutex<Vec<u16>>,
     bad_echo: Mutex<bool>,
 }
@@ -123,15 +134,7 @@ impl Transport for Receiver {
 fn request(account: &str) -> Subscribe {
     serde_json::from_value(json!({"name":"message.created","arguments":{"account_id":account,"mailbox":"INBOX"},"delivery":{"mode":"webhook","url":format!("https://{account}.example.com/events"),"secret":mock_secret()},"cursor":null})).unwrap()
 }
-fn setup() -> (
-    tempfile::TempDir,
-    Settings,
-    Db,
-    Arc<Auth>,
-    Arc<Mail>,
-    Arc<Receiver>,
-    Arc<Events>,
-) {
+fn setup() -> TestSetup {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(&dir.path().join("events.db")).unwrap();
     let settings = Settings {

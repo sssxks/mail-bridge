@@ -84,7 +84,7 @@ pub fn utf7_decode(value: &str) -> Result<String> {
             result.push('&');
         } else {
             let mut encoded = rest[..end].replace(',', "/");
-            while encoded.len() % 4 != 0 {
+            while !encoded.len().is_multiple_of(4) {
                 encoded.push('=');
             }
             let raw = STANDARD.decode(encoded).map_err(safe)?;
@@ -92,7 +92,9 @@ pub fn utf7_decode(value: &str) -> Result<String> {
                 return Err(Error("Invalid mailbox encoding"));
             }
             let units: Vec<u16> = raw
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|b| u16::from_be_bytes([b[0], b[1]]))
                 .collect();
             result.push_str(&String::from_utf16(&units).map_err(safe)?);

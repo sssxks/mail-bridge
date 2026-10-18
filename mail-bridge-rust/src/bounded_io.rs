@@ -37,19 +37,19 @@ impl<T> GuardIo<T> {
                 return Err(io::Error::other("IMAP response line limit"));
             }
             if byte == b'\n' {
-                if self.line.ends_with(b"}\r\n") {
-                    if let Some(start) = self.line.iter().rposition(|&b| b == b'{') {
-                        let raw = &self.line[start + 1..self.line.len() - 3];
-                        let raw = raw.strip_suffix(b"+").unwrap_or(raw);
-                        let number = std::str::from_utf8(raw)
-                            .ok()
-                            .and_then(|s| s.parse::<usize>().ok())
-                            .ok_or_else(|| io::Error::other("Invalid literal"))?;
-                        if number > MAX_MAIL + 8192 {
-                            return Err(io::Error::other("IMAP literal limit"));
-                        }
-                        self.literal = number;
+                if self.line.ends_with(b"}\r\n")
+                    && let Some(start) = self.line.iter().rposition(|&b| b == b'{')
+                {
+                    let raw = &self.line[start + 1..self.line.len() - 3];
+                    let raw = raw.strip_suffix(b"+").unwrap_or(raw);
+                    let number = std::str::from_utf8(raw)
+                        .ok()
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .ok_or_else(|| io::Error::other("Invalid literal"))?;
+                    if number > MAX_MAIL + 8192 {
+                        return Err(io::Error::other("IMAP literal limit"));
                     }
+                    self.literal = number;
                 }
                 self.line.clear();
             }
