@@ -6,15 +6,15 @@ startup configuration, password-directory fallback, or account credential mount.
 
 ## Add an account from chat
 
-1. Ask to add a mailbox. `begin_account_setup` returns a private link and setup ID.
+1. Ask to add a mailbox. `begin_account_setup` returns a private link and expiry time.
 2. Open the link within ten minutes. Enter the account ID, display name, address,
    IMAP hostname/port, TLS or STARTTLS, mailbox client password, and independent
    service owner password in the private page. A separate login username and SMTP
    server settings are optional. SMTP remains disabled for every newly added account.
 3. Saving commits the account to SQLite and publishes it to the shared registry.
    The current process can immediately use it; no restart is needed.
-4. `account_setup_status` reports pending/saved for that OAuth connection.
-   `list_accounts` and `configuration_status` inspect accounts without connecting.
+4. After the page reports success, use `list_accounts` to find the new account.
+   `configuration_status` also inspects accounts without connecting.
    Saving or reporting `ready` does not prove login. Mail actions take an account ID.
 
 Only the owner-confirmed private form receives passwords. Neither MCP tool accepts

@@ -15,8 +15,8 @@ pub struct Mcp {
     pub events: Option<Arc<crate::events::Events>>,
 }
 /// Fixed tool catalog, initialized once and shared for the process lifetime.
-/// Listing clones the catalog; lookup scans ten entries and clones only the match.
-pub static TOOLS: LazyLock<[Tool; 10]> = LazyLock::new(|| {
+/// Listing clones the catalog; lookup scans nine entries and clones only the match.
+pub static TOOLS: LazyLock<[Tool; 9]> = LazyLock::new(|| {
     let string = json!({"type":"string","minLength":1});
     let uid = json!({"type":"integer","minimum":1,"maximum":4294967295u64});
     let page = json!({"folder":{"type":"string","minLength":1,"maxLength":512},"limit":{"type":"integer","minimum":1,"maximum":20},"before_uid":uid,"uidvalidity":uid});
@@ -32,12 +32,6 @@ pub static TOOLS: LazyLock<[Tool; 10]> = LazyLock::new(|| {
             "Create a private mailbox setup link valid for 10 minutes.",
             json!({}),
             vec![],
-        ),
-        (
-            "account_setup_status",
-            "Get setup status: pending or saved.",
-            json!({"setup_id":{"type":"string","minLength":1,"maxLength":64}}),
-            vec!["setup_id"],
         ),
         (
             "configuration_status",
@@ -89,7 +83,7 @@ pub static TOOLS: LazyLock<[Tool; 10]> = LazyLock::new(|| {
         ),
     ];
     definitions.map(|(name,description,mut properties,mut required)|{
-        if !matches!(name, "list_accounts" | "configuration_status" | "begin_account_setup" | "account_setup_status") {
+        if !matches!(name, "list_accounts" | "configuration_status" | "begin_account_setup") {
             properties["account_id"]=json!({"type":"string","pattern":"^[a-z0-9_-]{1,32}$"});
             required.push("account_id");
         }
@@ -228,26 +222,14 @@ impl ServerHandler for Mcp {
             return Ok(result.into());
         }
         let args = Value::Object(request.arguments.unwrap_or_default());
-        let outcome = if matches!(
-            request.name.as_ref(),
-            "begin_account_setup" | "account_setup_status"
-        ) {
+        let outcome = if request.name == "begin_account_setup" {
             let client = context
                 .extensions
                 .get::<axum::http::request::Parts>()
                 .and_then(|p| p.extensions.get::<Principal>());
-            match (request.name.as_ref(), client) {
-                ("begin_account_setup", Some(client))
-                    if args.as_object().is_some_and(|v| v.is_empty()) =>
-                {
+            match client {
+                Some(client) if args.as_object().is_some_and(|v| v.is_empty()) => {
                     self.setup.begin(&client.0, &self.auth.base)
-                }
-                ("account_setup_status", Some(client))
-                    if args.as_object().is_some_and(|v| v.len() == 1)
-                        && args["setup_id"].as_str().is_some_and(|v| v.len() <= 64) =>
-                {
-                    self.setup
-                        .status(&client.0, args["setup_id"].as_str().unwrap())
                 }
                 _ => Err(crate::Error(
                     "Invalid setup arguments or missing authenticated connection",

@@ -2,8 +2,7 @@
 //!
 //! | Operation | Frequency | Complexity | Storage | Forbidden implementation |
 //! | --- | --- | --- | --- | --- |
-//! | Find ticket | Page/submit | O(n + ticket bytes), n <= 8 | BTreeMap | Hash ticket per candidate |
-//! | Status | Poll | O(log n) | Existing setup ID index | Secondary status map |
+//! | Find ticket | Page/submit | O(n + ticket bytes), n <= 8 | Vec | Hash ticket per candidate |
 //! | Transition | Page/save | O(1) excluding IO | Inline enum | Empty-string state sentinel |
 use crate::{
     Error, Result,
@@ -13,19 +12,19 @@ use crate::{
     safe,
 };
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, sync::Mutex};
+use std::sync::Mutex;
 use zeroize::Zeroizing;
 
 const TTL: i64 = 600;
 const MAX_SESSIONS: usize = 8;
-/// `Invited | Opened(csrf_hash) | Saved(account_id)`.
+/// `Invited | Opened(csrf_hash) | Saved`.
 ///
 /// Each variant owns only its relevant immutable payload. A saved invitation
 /// cannot retain a CSRF token, and an unopened invitation cannot authorize POST.
 enum Progress {
     Invited,
     Opened { csrf_hash: Box<str> },
-    Saved { account_id: Box<str> },
+    Saved,
 }
 
 /// `Client × TicketHash × Expiry × Progress`. Identity and expiry are fixed;
@@ -36,48 +35,31 @@ struct Session {
     expires: i64,
     progress: Progress,
 }
-/// At most eight live invitations indexed by opaque setup ID.
+/// At most eight live invitations stored in insertion order.
 /// The mutex serializes form opening, owner confirmation and commit/publication,
 /// so two submissions cannot activate the same invitation twice.
 #[derive(Default)]
 pub struct AccountSetup {
-    sessions: Mutex<BTreeMap<String, Session>>,
+    sessions: Mutex<Vec<Session>>,
 }
 impl AccountSetup {
     /// Reclaim expired entries and issue a client-bound, ten-minute invitation.
     pub fn begin(&self, client: &str, base: &str) -> Result<Value> {
         let mut sessions = self.sessions.lock().map_err(safe)?;
-        sessions.retain(|_, s| s.expires > now());
+        sessions.retain(|s| s.expires > now());
         if sessions.len() >= MAX_SESSIONS {
             return Err(Error("Too many setup invitations; try after they expire"));
         }
-        let setup_id = random();
         let ticket = random();
         let expires = now() + TTL;
-        sessions.insert(
-            setup_id.clone(),
-            Session {
-                client: client.into(),
-                ticket_hash: hash(&ticket).into(),
-                expires,
-                progress: Progress::Invited,
-            },
-        );
+        sessions.push(Session {
+            client: client.into(),
+            ticket_hash: hash(&ticket).into(),
+            expires,
+            progress: Progress::Invited,
+        });
         Ok(
-            json!({"setup_id": setup_id, "setup_url": format!("{base}/accounts/setup?ticket={ticket}"), "expires_at": expires,
-            "status": "pending"}),
-        )
-    }
-    /// Report progress only to the originating client while the invitation lives.
-    pub fn status(&self, client: &str, setup_id: &str) -> Result<Value> {
-        let sessions = self.sessions.lock().map_err(safe)?;
-        let session = sessions.get(setup_id).filter(|s| s.client.as_ref() == client && s.expires > now()).ok_or(Error("Setup invitation unavailable or expired; use list_accounts to inspect saved accounts"))?;
-        let (status, account_id) = match &session.progress {
-            Progress::Invited | Progress::Opened { .. } => ("pending", None),
-            Progress::Saved { account_id } => ("saved", Some(account_id)),
-        };
-        Ok(
-            json!({"setup_id":setup_id,"status":status,"account_id":account_id,"connection_tested":false,"restart_required":false}),
+            json!({"setup_url": format!("{base}/accounts/setup?ticket={ticket}"), "expires_at": expires}),
         )
     }
     /// Open or reopen a pending invitation, replacing its browser CSRF token.
@@ -85,11 +67,11 @@ impl AccountSetup {
         let mut sessions = self.sessions.lock().map_err(safe)?;
         let ticket_hash = hash(ticket);
         let session = sessions
-            .values_mut()
+            .iter_mut()
             .find(|s| {
                 s.ticket_hash.as_ref() == ticket_hash
                     && s.expires > now()
-                    && !matches!(s.progress, Progress::Saved { .. })
+                    && !matches!(s.progress, Progress::Saved)
             })
             .ok_or(Error("Setup invitation unavailable or expired"))?;
         if !auth.setup_grant_active(&session.client)? {
@@ -127,11 +109,11 @@ impl AccountSetup {
         let mut sessions = self.sessions.lock().map_err(safe)?;
         let ticket_hash = hash(&ticket);
         let session = sessions
-            .values_mut()
+            .iter_mut()
             .find(|s| {
                 s.ticket_hash.as_ref() == ticket_hash
                     && s.expires > now()
-                    && !matches!(s.progress, Progress::Saved { .. })
+                    && !matches!(s.progress, Progress::Saved)
             })
             .ok_or(Error("Setup invitation unavailable or expired"))?;
         let Progress::Opened { csrf_hash } = &session.progress else {
@@ -172,9 +154,7 @@ impl AccountSetup {
         let account = crate::accounts::from_form(params)?;
         let id = account.id.clone();
         mail.add_account(account)?;
-        session.progress = Progress::Saved {
-            account_id: id.clone().into(),
-        };
+        session.progress = Progress::Saved;
         Ok(id)
     }
 }
@@ -183,12 +163,10 @@ impl AccountSetup {
 mod tests {
     use super::*;
     #[test]
-    fn expired_invitations_are_rejected_and_reclaimed() {
+    fn expired_invitations_are_reclaimed() {
         let setup = AccountSetup::default();
-        let invitation = setup.begin("client", "https://mail.example.com").unwrap();
-        let id = invitation["setup_id"].as_str().unwrap();
-        setup.sessions.lock().unwrap().get_mut(id).unwrap().expires = now() - 1;
-        assert!(setup.status("client", id).is_err());
+        setup.begin("client", "https://mail.example.com").unwrap();
+        setup.sessions.lock().unwrap()[0].expires = now() - 1;
         setup.begin("client", "https://mail.example.com").unwrap();
         assert_eq!(setup.sessions.lock().unwrap().len(), 1);
     }

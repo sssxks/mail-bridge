@@ -109,8 +109,6 @@ try:
             assert observed['post_origin']==base
             assert observed['post_referer']==base+'/'
             assert observed['post_status']==200
-            status=tool('account_setup_status',{'setup_id':invitation['setup_id']})
-            assert status['status']=='saved' and status['restart_required'] is False
             accounts=tool('list_accounts',{})
             assert accounts['account_count']==1 and accounts['accounts'][0]['account_id']=='browser-test'
             assert accounts['accounts'][0]['smtp_enabled'] is False and accounts['accounts'][0]['connection_tested'] is False

@@ -84,7 +84,6 @@ fn invitation_requires_opening_rotates_csrf_and_saves_once() {
     let (_dir, settings, db, auth, mail) = fixture();
     let setup = AccountSetup::default();
     let invitation = setup.begin("client-a", &settings.public_url).unwrap();
-    let id = invitation["setup_id"].as_str().unwrap();
     let url = url::Url::parse(invitation["setup_url"].as_str().unwrap()).unwrap();
     let ticket = url
         .query_pairs()
@@ -114,9 +113,6 @@ fn invitation_requires_opening_rotates_csrf_and_saves_once() {
     invalid.insert("imap_port".into(), "0".into());
     assert!(setup.submit(invalid, &csrf, &auth, &mail).is_err());
     assert!(db.runtime_accounts().unwrap().is_empty());
-    let pending = setup.status("client-a", id).unwrap();
-    assert_eq!(pending["status"], "pending");
-    assert_eq!(pending["account_id"], Value::Null);
 
     assert_eq!(
         setup.submit(current.clone(), &csrf, &auth, &mail).unwrap(),
@@ -124,7 +120,6 @@ fn invitation_requires_opening_rotates_csrf_and_saves_once() {
     );
     assert!(setup.submit(current, &csrf, &auth, &mail).is_err());
     assert!(setup.page(&ticket, &auth).is_err());
-    assert_eq!(setup.status("client-a", id).unwrap()["account_id"], "work");
     assert_eq!(db.runtime_accounts().unwrap().len(), 1);
 }
 
@@ -193,14 +188,15 @@ async fn mcp_to_private_form_live_account_and_restart() {
     let (status, _, _) = request(app.clone(), "/mcp", "POST", "{}".into(), None, None, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let invitation = rpc(app.clone(), "begin_account_setup", json!({})).await;
+    assert!(invitation.get("setup_id").is_none());
     assert_eq!(
-        rpc(
-            app.clone(),
-            "account_setup_status",
-            json!({"setup_id":invitation["setup_id"]})
-        )
-        .await["status"],
-        "pending"
+        rpc(app.clone(), "list_accounts", json!({})).await["account_count"],
+        0
+    );
+    assert!(
+        !mail_bridge_rust::mcp::TOOLS
+            .iter()
+            .any(|tool| tool.name == "account_setup_status")
     );
     let url = url::Url::parse(invitation["setup_url"].as_str().unwrap()).unwrap();
     let path = format!("{}?{}", url.path(), url.query().unwrap());
@@ -269,17 +265,9 @@ async fn mcp_to_private_form_live_account_and_restart() {
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     assert!(!String::from_utf8_lossy(&body).contains(MAILBOX));
     assert!(!String::from_utf8_lossy(&body).contains(OWNER));
-    let result = rpc(
-        app.clone(),
-        "account_setup_status",
-        json!({"setup_id":invitation["setup_id"]}),
-    )
-    .await;
-    assert_eq!(result["status"], "saved");
-    assert_eq!(result["account_id"], "work");
-    assert_eq!(result["restart_required"], false);
     let listed = rpc(app.clone(), "list_accounts", json!({})).await;
     assert_eq!(listed["account_count"], 1);
+    assert_eq!(listed["accounts"][0]["account_id"], "work");
     assert_eq!(listed["accounts"][0]["smtp_enabled"], false);
     assert_eq!(listed["accounts"][0]["connection_tested"], false);
     assert!(!listed.to_string().contains(MAILBOX));
@@ -322,11 +310,6 @@ fn owner_confirmation_client_binding_revocation_and_capacity() {
     let (_dir, settings, db, auth, mail) = fixture();
     let setup = AccountSetup::default();
     let invitation = setup.begin("client-a", &settings.public_url).unwrap();
-    assert!(
-        setup
-            .status("client-b", invitation["setup_id"].as_str().unwrap())
-            .is_err()
-    );
     let url = url::Url::parse(invitation["setup_url"].as_str().unwrap()).unwrap();
     let ticket = url
         .query_pairs()

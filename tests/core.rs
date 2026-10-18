@@ -745,7 +745,7 @@ async fn oauth_pkce_mcp_and_scope_for_callback(callback: &str) {
     )
     .await;
     let listed: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 10);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 9);
     let(_,_,bytes)=request(app.clone(),"/mcp","POST",json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"prepare_draft","arguments":{"account_id":"qq","to":["a@example.com"],"subject":"subject","body":"body"}}}).to_string(),Some(token),None,None).await;
     assert_eq!(
         serde_json::from_slice::<Value>(&bytes).unwrap()["result"]["isError"],
@@ -1013,10 +1013,7 @@ async fn two_account_sender_and_request_id_isolation() {
     for tool in mail_bridge_rust::mcp::TOOLS.iter() {
         if !matches!(
             tool.name.as_ref(),
-            "configuration_status"
-                | "list_accounts"
-                | "begin_account_setup"
-                | "account_setup_status"
+            "configuration_status" | "list_accounts" | "begin_account_setup"
         ) {
             assert!(
                 tool.input_schema["required"]
