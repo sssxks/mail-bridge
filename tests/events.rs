@@ -150,7 +150,7 @@ fn setup() -> TestSetup {
     db.0.lock()
         .unwrap()
         .execute(
-            "INSERT INTO tokens VALUES (?,'refresh','owner',?,'mail:read mail:events',?)",
+            "INSERT INTO tokens VALUES (?,'refresh','owner',?,'mail:read',?)",
             params![hash("mock-refresh"), auth.resource, now() + 86400],
         )
         .unwrap();
@@ -434,7 +434,7 @@ async fn rpc(
 #[tokio::test]
 async fn actual_mcp2026_discovery_catalog_subscribe_and_scope_challenge() {
     let (_d, settings, db, auth, _mail, _receiver, events) = setup();
-    for (token, scope) in [("all", "mail:read mail:events"), ("read", "mail:read")] {
+    for (token, scope) in [("read", "mail:read"), ("send", "mail:send")] {
         db.0.lock()
             .unwrap()
             .execute(
@@ -454,7 +454,7 @@ async fn actual_mcp2026_discovery_catalog_subscribe_and_scope_challenge() {
         mail.clone(),
         Some(events.clone()),
     );
-    let (_, _, discover) = rpc(app.clone(), "server/discover", json!({}), "all").await;
+    let (_, _, discover) = rpc(app.clone(), "server/discover", json!({}), "read").await;
     assert!(
         discover["result"]["capabilities"]["events"].is_object(),
         "{discover}"
@@ -463,29 +463,29 @@ async fn actual_mcp2026_discovery_catalog_subscribe_and_scope_challenge() {
         discover["result"]["supportedVersions"],
         json!(["2026-07-28"])
     );
-    let (_, _, catalog) = rpc(app.clone(), "events/list", json!({}), "all").await;
+    let (_, _, catalog) = rpc(app.clone(), "events/list", json!({}), "read").await;
     assert_eq!(
         catalog["result"]["events"][0]["name"], "message.created",
         "{catalog}"
     );
     let args = json!({"name":"message.created","arguments":{"account_id":"qq","mailbox":"INBOX"},"delivery":{"mode":"webhook","url":"https://qq.example.com/events","secret":mock_secret()},"cursor":null});
-    let (status, headers, _) = rpc(app.clone(), "events/subscribe", args.clone(), "read").await;
+    let (status, headers, _) = rpc(app.clone(), "events/subscribe", args.clone(), "send").await;
     assert_eq!(status, 403);
     assert!(
         headers["www-authenticate"]
             .to_str()
             .unwrap()
-            .contains("mail:events")
+            .contains("mail:read")
     );
-    let (_, _, sub) = rpc(app.clone(), "events/subscribe", args.clone(), "all").await;
+    let (_, _, sub) = rpc(app.clone(), "events/subscribe", args.clone(), "read").await;
     assert!(sub["result"]["id"].as_str().is_some(), "{sub}");
-    let (_, _, unsub) = rpc(app, "events/unsubscribe", args, "all").await;
+    let (_, _, unsub) = rpc(app, "events/unsubscribe", args, "read").await;
     assert_eq!(unsub["result"], json!({}));
     assert!(events.active().unwrap().is_empty());
     let off = mail_bridge_rust::http::router(&settings, auth, mail);
-    let (_, _, discover) = rpc(off.clone(), "server/discover", json!({}), "all").await;
+    let (_, _, discover) = rpc(off.clone(), "server/discover", json!({}), "read").await;
     assert!(discover["result"]["capabilities"].get("events").is_none());
-    let (_, _, catalog) = rpc(off, "events/list", json!({}), "all").await;
+    let (_, _, catalog) = rpc(off, "events/list", json!({}), "read").await;
     assert_eq!(catalog["error"]["code"], -32601);
 }
 #[tokio::test]

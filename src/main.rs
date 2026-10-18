@@ -65,7 +65,7 @@ fn run() -> mail_bridge_rust::Result<()> {
     let auth = Arc::new(Auth::new(&settings, db.clone()));
     let mail = Arc::new(MailService::from_store(db.clone())?);
     let events =
-        if std::env::var("MAIL_BRIDGE_EVENTS_ENABLED").is_ok_and(|v| v == "true" || v == "1") {
+        if std::env::var("MAIL_BRIDGE_EVENTS_ENABLED").map_or(true, |v| v == "true" || v == "1") {
             Some(Arc::new(mail_bridge_rust::events::Events::new(
                 db.clone(),
                 auth.clone(),

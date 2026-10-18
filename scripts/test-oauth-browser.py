@@ -28,7 +28,7 @@ base='https://mail.example.test'
 owner='browser-test-owner-password-00000000'
 sock=socket.socket(); sock.bind(('127.0.0.1',0)); port=sock.getsockname()[1]; sock.close()
 env={k:v for k,v in os.environ.items() if not k.startswith('MAIL_BRIDGE_') and k!='CREDENTIALS_DIRECTORY'}
-env.update(MAIL_BRIDGE_OWNER_PASSWORD=owner,MAIL_BRIDGE_PUBLIC_URL=base,MAIL_BRIDGE_OAUTH_REDIRECT_URIS=json.dumps(['http://127.0.0.1/callback']),MAIL_BRIDGE_DATA_DIR=str(work),MAIL_BRIDGE_BIND=f'127.0.0.1:{port}',MAIL_BRIDGE_EVENTS_ENABLED='false')
+env.update(MAIL_BRIDGE_OWNER_PASSWORD=owner,MAIL_BRIDGE_PUBLIC_URL=base,MAIL_BRIDGE_OAUTH_REDIRECT_URIS=json.dumps(['http://127.0.0.1/callback']),MAIL_BRIDGE_DATA_DIR=str(work),MAIL_BRIDGE_BIND=f'127.0.0.1:{port}')
 process=subprocess.Popen([str(args.server_binary.resolve())],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 def request(path,body=None):
     data=None if body is None else json.dumps(body).encode()
@@ -97,6 +97,12 @@ try:
                 result=json.loads(urllib.request.urlopen(req,timeout=5).read())['result']
                 assert not result.get('isError'), 'MCP tool must succeed'
                 return json.loads(result['content'][0]['text'])
+            discovery_params={'_meta':{'io.modelcontextprotocol/protocolVersion':'2026-07-28','io.modelcontextprotocol/clientCapabilities':{},'io.modelcontextprotocol/clientInfo':{'name':'browser-regression','version':'1'}}}
+            discovery_data=json.dumps({'jsonrpc':'2.0','id':2,'method':'server/discover','params':discovery_params}).encode()
+            discovery_request=urllib.request.Request(f'http://127.0.0.1:{port}/mcp',data=discovery_data,headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream','Authorization':'Bearer '+tokens['access_token'],'MCP-Protocol-Version':'2026-07-28','Mcp-Method':'server/discover','Host':'mail.example.test'})
+            discovery=json.loads(urllib.request.urlopen(discovery_request,timeout=5).read())
+            assert discovery['result']['capabilities']['events']=={}
+            observed['events_enabled_by_default']=True
             assert tool('list_accounts',{})['account_count']==0
             invitation=tool('begin_account_setup',{})
             page.goto(invitation['setup_url'])

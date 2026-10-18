@@ -51,10 +51,7 @@ fn scopes(value: &str) -> Result<String> {
     let mut v: Vec<&str> = value.split_whitespace().collect();
     v.sort_unstable();
     v.dedup();
-    if v.is_empty()
-        || v.iter()
-            .any(|s| !matches!(*s, "mail:read" | "mail:send" | "mail:events"))
-    {
+    if v.is_empty() || v.iter().any(|s| !matches!(*s, "mail:read" | "mail:send")) {
         return Err(Error("invalid_scope"));
     }
     Ok(v.join(" "))
@@ -405,7 +402,7 @@ impl Auth {
         for scope in scopes {
             let scope = scope.map_err(safe)?;
             let fields: Vec<_> = scope.split_whitespace().collect();
-            if fields.contains(&"mail:read") && fields.contains(&"mail:events") {
+            if fields.contains(&"mail:read") {
                 return Ok(true);
             }
         }

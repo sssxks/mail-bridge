@@ -5,7 +5,7 @@ services:
     ports:
       - "127.0.0.1:18765:18765"
     environment:
-      MAIL_BRIDGE_EVENTS_ENABLED: "false"
+      MAIL_BRIDGE_EVENTS_ENABLED: "true"
       MAIL_BRIDGE_OWNER_PASSWORD_FILE: /run/owner_password
       MAIL_BRIDGE_PUBLIC_URL: ${MAIL_BRIDGE_PUBLIC_URL:?Set your HTTPS origin}
       MAIL_BRIDGE_OAUTH_REDIRECT_URIS: ${MAIL_BRIDGE_OAUTH_REDIRECT_URIS:-["https://chatgpt.com/connector_platform_oauth_redirect"]}

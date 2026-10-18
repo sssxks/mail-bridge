@@ -119,15 +119,12 @@ impl ServerHandler for Mcp {
             .ok_or_else(|| {
                 ErrorData::new(ErrorCode(-32024), "Authenticated principal required", None)
             })?;
-        let permitted = scopes.is_some_and(|s| {
-            s.iter().any(|v| v == "mail:read")
-                && (request.method != "events/subscribe" || s.iter().any(|v| v == "mail:events"))
-        });
+        let permitted = scopes.is_some_and(|s| s.iter().any(|v| v == "mail:read"));
         if !permitted {
             return Err(ErrorData::new(
                 ErrorCode(-32024),
-                "Authorize mail:read and mail:events before subscribing",
-                Some(json!({"scope":"mail:read mail:events"})),
+                "Authorize mail:read before subscribing",
+                Some(json!({"scope":"mail:read"})),
             ));
         }
         let value = match request.method.as_str() {

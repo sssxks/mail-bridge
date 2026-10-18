@@ -40,7 +40,7 @@ MAIL_BRIDGE_PUBLIC_URL=https://your-mail.example.com
 MAIL_BRIDGE_OAUTH_REDIRECT_URIS=["https://chatgpt.com/connector_platform_oauth_redirect"]
 MAIL_BRIDGE_DATA_DIR=/private/path/state
 MAIL_BRIDGE_BIND=127.0.0.1:18765
-MAIL_BRIDGE_EVENTS_ENABLED=false
+MAIL_BRIDGE_EVENTS_ENABLED=true
 ```
 
 The owner enters a separate 32-256 character ASCII owner password privately. It
@@ -53,8 +53,8 @@ Use the platform's actual callback. HTTPS callbacks are exact; native desktop
 callbacks require an explicit literal loopback IP, e.g. `http://127.0.0.1/callback`.
 A portless loopback policy allows ephemeral ports on that IP and exact path.
 Registration and token exchange still require the exact registered redirect and
-PKCE S256. Default discovery advertises `mail:read`; sending and events require
-separate scopes and feature controls. Connect the deployed `/mcp` endpoint directly
+PKCE S256. Default discovery advertises `mail:read`, which also authorizes Events; sending
+requires `mail:send` and an SMTP-enabled account. Connect the deployed `/mcp` endpoint directly
 in ChatGPT using OAuth; no separate plugin ZIP is required. Adding the connection
 does not host or start the service.
 
@@ -114,8 +114,9 @@ The HTTPS page needs no external assets or JavaScript.
 
 ## Events, upgrades and revocation
 
-Events default off. New account setup never creates a subscription or starts an
-IMAP watcher. If events are enabled and explicitly subscribed, the event source
+Events default on; set `MAIL_BRIDGE_EVENTS_ENABLED=false` to disable them.
+New account setup never creates a subscription or starts an IMAP watcher.
+With an explicit subscription authorized by `mail:read`, the event source
 and catalog resolve accounts from the same runtime store without a restart.
 See [event contract](EVENTS.md) for platform signing and delivery requirements.
 

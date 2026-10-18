@@ -163,13 +163,12 @@ async fn authenticated(State(state): State<App>, mut request: Request, next: Nex
             .extensions()
             .get::<EventMethod>()
             .is_some_and(|m| m.0 == "events/subscribe")
-            && (!scopes.iter().any(|v| v == "mail:read")
-                || !scopes.iter().any(|v| v == "mail:events"))
+            && !scopes.iter().any(|v| v == "mail:read")
         {
             let mut response = error(StatusCode::FORBIDDEN);
             if let Ok(value) = format!(
                 "{}, error=\"insufficient_scope\"",
-                state.auth.challenge("mail:read mail:events")
+                state.auth.challenge("mail:read")
             )
             .parse()
             {

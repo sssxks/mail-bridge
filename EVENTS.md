@@ -6,12 +6,11 @@ implementation of OpenAI's webhook subset, not a claim of live platform approval
 OpenAI documents CallbackEndpointError=-32015; the linked draft uses -32027.
 This adapter follows OpenAI's -32015 with a categorized data.reason.
 
-Default OFF. After a separately approved deployment, enable
-MAIL_BRIDGE_EVENTS_ENABLED=true and restart. Re-scan the private plugin, grant
-mail:read AND mail:events, then ask the platform to subscribe. No real persistent
-access or callback is created by the build/test process. The platform must
-supply its own destination URL and whsec_ secret; do not invent real ones in chat.
-mail:send is independent and unnecessary for observing mail.
+Events are enabled by default. Set MAIL_BRIDGE_EVENTS_ENABLED=false and restart
+to disable them. Clients use mail:read for discovery and subscriptions;
+mail:send is independent and unnecessary for observing mail. An explicit
+subscription with a verified platform-provided webhook URL and whsec_ secret
+starts mailbox watching. Enabling the feature alone creates no subscriptions.
 
 The same authenticated POST /mcp implements:
 - server/discover: capabilities.events={}, supportedVersions=[2026-07-28].
@@ -25,7 +24,7 @@ params._meta io.modelcontextprotocol/protocolVersion and clientCapabilities.
 The official rmcp SDK validates these; its extension callback handles event
 methods. A small discovery adapter supplies the events capability absent from
 the SDK's typed capabilities. Legacy 2025 tool clients are retained.
-Missing subscribe scope returns HTTP403 + WWW-Authenticate insufficient_scope.
+Missing mail:read scope returns HTTP403 + WWW-Authenticate insufficient_scope.
 
 Subscription identity is a deterministic hash of authenticated OAuth client
 principal, canonical URL, event name and typed canonical filter arguments.
@@ -33,6 +32,9 @@ Reordered argument keys cannot duplicate it. Each principal has isolated
 subscriptions; this is a single mailbox-owner connector, not a multi-tenant SaaS.
 Default TTL1h, granted range60s-24h, finite even when no expiration is requested.
 Reauthorization uses the same principal; expiry/revocation stops workers.
+Clients renew using events/subscribe before refreshBefore. Expiry stops the
+subscription without emitting a webhook; this service never invokes a model
+for renewal. Whether renewal uses a model depends on the client implementation.
 
 Before acceptance, HTTPS-only callback verification posts a fresh signed
 verification challenge; only 2xx plus constant-time matching JSON echo succeeds.
