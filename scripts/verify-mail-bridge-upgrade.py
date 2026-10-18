@@ -20,8 +20,10 @@ db.execute('INSERT INTO tokens VALUES (?,?,?,?,?,?)', (digest, 'access', 'deploy
 db.commit()
 
 def rpc(method, params):
-    params['_meta'] = {'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientCapabilities': {}, 'io.modelcontextprotocol/clientInfo': {'name': 'deployment-check', 'version': '1'}}
-    request = urllib.request.Request(origin + '/mcp', data=json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params}).encode(), headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream', 'Mcp-Method': method, 'MCP-Protocol-Version': '2026-07-28'})
+    version = '2025-06-18' if method.startswith('tools/') else '2026-07-28'
+    if version == '2026-07-28':
+        params['_meta'] = {'io.modelcontextprotocol/protocolVersion': version, 'io.modelcontextprotocol/clientCapabilities': {}, 'io.modelcontextprotocol/clientInfo': {'name': 'deployment-check', 'version': '1'}}
+    request = urllib.request.Request(origin + '/mcp', data=json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params}).encode(), headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream', 'Mcp-Method': method, 'MCP-Protocol-Version': version})
     with urllib.request.urlopen(request, timeout=15) as response:
         value = json.load(response)
     assert 'error' not in value, 'RPC failed: ' + method
