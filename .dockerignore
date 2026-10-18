@@ -6,3 +6,7 @@ config.json
 *.sqlite3*
 tests
 .git
+
+dist
+releases
+.research

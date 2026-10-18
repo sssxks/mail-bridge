@@ -6,17 +6,18 @@ import tomllib
 
 root = Path(__file__).resolve().parent
 files = [
-    'Cargo.toml', 'Cargo.lock', 'README.md', 'TEST-RESULTS.txt',
+    'Cargo.toml', 'Cargo.lock',
+    'scripts/test-account-migration.py', 'scripts/test-oauth-browser.py', 'scripts/deploy-mail-bridge.sh', 'README.md', 'TEST-RESULTS.txt',
     'Dockerfile', 'Dockerfile.runtime', 'compose.example.yaml', '.dockerignore',
     '.gitignore', 'package.py', 'deploy/mail-bridge-rust.service',
     'deploy/service.env.example', 'deploy/nginx-location.example.conf',
     'deploy/migrate-accounts.py', 'deploy/verify-account-migration.py', 'deploy/SETUP.md', 'deploy/DEPLOYMENT.md',
     'src/accounts.rs', 'src/account_setup.rs', 'src/account_setup.html', 'tests/account_setup.rs',
     'src/main.rs', 'src/lib.rs', 'src/config.rs', 'src/db.rs', 'src/bounded_io.rs',
-    'src/mail.rs', 'src/auth.rs', 'src/mcp.rs', 'src/http.rs', 'tests/core.rs', 'tests/events.rs', 'src/events.rs', 'src/webhook.rs', 'EVENTS.md',
+    'src/mail.rs', 'src/mail/page.rs', 'src/mail/draft.rs', 'src/auth.rs', 'src/mcp.rs', 'src/http.rs', 'tests/core.rs', 'tests/events.rs', 'src/events.rs', 'src/webhook.rs', 'EVENTS.md',
 ]
 version = tomllib.loads((root / 'Cargo.toml').read_text())['package']['version']
-archive = root.parent / 'releases' / f'mail-bridge-rust-http-{version}.zip'
+archive = root / 'releases' / f'mail-bridge-rust-http-{version}.zip'
 archive.parent.mkdir(parents=True, exist_ok=True)
 with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as output:
     for name in files:

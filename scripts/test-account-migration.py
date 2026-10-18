@@ -8,10 +8,10 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("migration", ROOT / "mail-bridge-rust/deploy/migrate-accounts.py")
+SPEC = importlib.util.spec_from_file_location("migration", ROOT / "deploy/migrate-accounts.py")
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
-VERIFY_SPEC = importlib.util.spec_from_file_location("verification", ROOT / "mail-bridge-rust/deploy/verify-account-migration.py")
+VERIFY_SPEC = importlib.util.spec_from_file_location("verification", ROOT / "deploy/verify-account-migration.py")
 VERIFICATION = importlib.util.module_from_spec(VERIFY_SPEC)
 VERIFY_SPEC.loader.exec_module(VERIFICATION)
 

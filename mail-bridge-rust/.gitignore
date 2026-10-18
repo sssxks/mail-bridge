@@ -1,7 +1,0 @@
-/target/
-/data/
-/dist/
-.env
-config.json
-*password*
-*.sqlite3*

@@ -15,7 +15,7 @@ from playwright.sync_api import sync_playwright
 root=Path(__file__).resolve().parents[1]
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--browser',required=True,type=Path)
-parser.add_argument('--server-binary',type=Path,default=root/'mail-bridge-rust/target/debug'/('mail-bridge-rust.exe' if os.name=='nt' else 'mail-bridge-rust'))
+parser.add_argument('--server-binary',type=Path,default=root/'target/debug'/('mail-bridge-rust.exe' if os.name=='nt' else 'mail-bridge-rust'))
 args=parser.parse_args()
 workroot=root/'.research/browser-consent-tests'
 workroot.mkdir(parents=True,exist_ok=True)
