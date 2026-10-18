@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">rust-dev skill</title>
+  <desc id="desc">A Rust-themed development badge: gear + code braces + checkmark for best practices.</desc>
+
+  <defs>
+    <radialGradient id="bg" cx="38%" cy="30%" r="80%">
+      <stop offset="0%" stop-color="#F6B26B"/>
+      <stop offset="55%" stop-color="#D9773A"/>
+      <stop offset="100%" stop-color="#A64B22"/>
+    </radialGradient>
+
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+
+    <clipPath id="clipCircle">
+      <circle cx="64" cy="64" r="60"/>
+    </clipPath>
+  </defs>
+
+  <!-- Badge -->
+  <g filter="url(#shadow)">
+    <circle cx="64" cy="64" r="60" fill="url(#bg)"/>
+    <circle cx="64" cy="64" r="54" fill="#1F1F1F" opacity="0.96"/>
+  </g>
+
+  <!-- Gear teeth -->
+  <g clip-path="url(#clipCircle)">
+    <g transform="translate(64 64)">
+      <!-- 8 teeth -->
+      <g fill="#F6B26B" opacity="0.95">
+        <rect x="-5" y="-56" width="10" height="16" rx="2" transform="rotate(0)"/>
+        <rect x="-5" y="-56" width="10" height="16" rx="2" transform="rotate(45)"/>
+        <rect x="-5" y="-56" width="10" height="16" rx="2" transform="rotate(90)"/>
+        <rect x="-5" y="-56" width="10" height="16" rx="2" transform="rotate(135)"/>
+        <rect x="-5" y="-56" width="10" height="16" rx="2" transform="rotate(180)"/>
+        <rect x="-5" y="-56" width="10" height="16" rx="2" transform="rotate(225)"/>
+        <rect x="-5" y="-56" width="10" height="16" rx="2" transform="rotate(270)"/>
+        <rect x="-5" y="-56" width="10" height="16" rx="2" transform="rotate(315)"/>
+      </g>
+    </g>
+  </g>
+
+  <!-- Gear ring -->
+  <circle cx="64" cy="64" r="40" fill="none" stroke="#F6B26B" stroke-width="10" opacity="0.9"/>
+  <circle cx="64" cy="64" r="28" fill="none" stroke="#2B2B2B" stroke-width="6" opacity="0.8"/>
+
+  <!-- Code braces -->
+  <g fill="none" stroke="#F7F1E6" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" opacity="0.95">
+    <!-- Left brace -->
+    <path d="M52 40
+             C44 40 44 52 52 56
+             C58 59 58 69 52 72
+             C44 76 44 88 52 88"/>
+    <!-- Right brace (mirrored feel) -->
+    <path d="M76 40
+             C84 40 84 52 76 56
+             C70 59 70 69 76 72
+             C84 76 84 88 76 88"/>
+  </g>
+
+  <!-- Best-practices check -->
+  <g>
+    <circle cx="64" cy="64" r="11" fill="#F7F1E6"/>
+    <path d="M59.5 64.5 L62.5 67.5 L69.5 60.5"
+          fill="none" stroke="#1F1F1F" stroke-width="4"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

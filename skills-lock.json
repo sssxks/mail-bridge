@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "rust-dev": {
+      "source": "sssxks/xks-skills",
+      "sourceType": "github",
+      "skillPath": "skills/rust-dev/SKILL.md",
+      "computedHash": "a9ede5979bce6eae92eafcd6efd0799c5b4905c72e370a3d9e0eb007633baa4b"
+    }
+  }
+}

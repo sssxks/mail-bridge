@@ -1,0 +1,12 @@
+# User facing metadata for Codex App
+
+interface:
+  display_name: "Rust Dev"
+  short_description: "Rust dev, type driven, micro optimization"
+  icon_small: "./assets/icon.svg"
+  icon_large: "./assets/icon.svg"
+  brand_color: "#D9773A"
+  default_prompt: "Init a [your-project-type] as per the skill. [your requirements and constraints]."
+
+policy:
+  allow_implicit_invocation: true
