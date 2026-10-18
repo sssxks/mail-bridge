@@ -264,14 +264,7 @@ async fn mcp_to_private_form_live_account_and_restart() {
             .unwrap(),
         listed
     );
-    assert_eq!(
-        db.runtime_accounts().unwrap()[0]
-            .password
-            .as_ref()
-            .unwrap()
-            .as_str(),
-        MAILBOX
-    );
+    assert_eq!(db.runtime_accounts().unwrap()[0].password.as_str(), MAILBOX);
 }
 
 #[test]

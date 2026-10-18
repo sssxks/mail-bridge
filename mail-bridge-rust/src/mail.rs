@@ -2,7 +2,7 @@ use crate::{
     Error, Result,
     bounded_io::{GuardIo, MAX_MAIL},
     clean, clipped,
-    config::{Config, Security},
+    config::{Config, MailboxCredential, Security},
     db::{Db, hash},
     safe,
 };
@@ -23,7 +23,6 @@ use tokio_rustls::{
     client::TlsStream,
     rustls::{ClientConfig, RootCertStore, pki_types::ServerName},
 };
-use zeroize::Zeroizing;
 
 pub type ImapSession = Session<GuardIo<TlsStream<TcpStream>>>;
 pub fn address(raw: &str) -> Result<Address> {
@@ -145,7 +144,7 @@ pub trait Backend: Send + Sync {
 #[derive(Clone)]
 pub struct RealBackend {
     pub config: Config,
-    pub password: Arc<Zeroizing<String>>,
+    pub password: MailboxCredential,
 }
 impl RealBackend {
     pub async fn connect(&self) -> Result<ImapSession> {
@@ -519,11 +518,9 @@ impl MailService {
         let accounts = accounts
             .into_iter()
             .map(|account| {
-                let backend = account.password.map(|password| {
-                    Arc::new(RealBackend {
-                        config: account.config.clone(),
-                        password,
-                    }) as Arc<dyn Backend>
+                let backend = Arc::new(RealBackend {
+                    config: account.config.clone(),
+                    password: account.password,
                 });
                 let id = account.id.clone();
                 (
@@ -532,8 +529,8 @@ impl MailService {
                         id: account.id,
                         name: account.name,
                         config: account.config,
-                        backend,
-                        credential_status: account.credential_status,
+                        backend: Some(backend),
+                        credential_status: "ready",
                     },
                 )
             })
@@ -566,7 +563,7 @@ impl MailService {
         self.db.insert_runtime_account(&account)?;
         let backend = Arc::new(RealBackend {
             config: account.config.clone(),
-            password: account.password.expect("validated password"),
+            password: account.password,
         });
         accounts.insert(
             account.id.clone(),

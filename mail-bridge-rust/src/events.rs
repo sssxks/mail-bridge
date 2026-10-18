@@ -103,9 +103,7 @@ impl ImapSource {
             .ok_or(Error("Account unavailable for events"))?;
         Ok(RealBackend {
             config: account.config,
-            password: account
-                .password
-                .ok_or(Error("Account unavailable for events"))?,
+            password: account.password,
         })
     }
 }

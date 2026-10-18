@@ -1,12 +1,11 @@
 //! The single persistent account store, shared by setup, mail and events.
 use crate::{
     Error, Result,
-    config::{AccountSettings, Config, valid_id},
+    config::{AccountSettings, Config, MailboxCredential, valid_id},
     db::Db,
     safe,
 };
 use rusqlite::params;
-use std::sync::Arc;
 use zeroize::Zeroizing;
 
 pub fn validate(account: &AccountSettings) -> Result<()> {
@@ -15,13 +14,6 @@ pub fn validate(account: &AccountSettings) -> Result<()> {
     }
     crate::clean(&account.name, 80)?;
     account.config.validate()?;
-    let password = account
-        .password
-        .as_ref()
-        .ok_or(Error("Mailbox credential required"))?;
-    if password.is_empty() || password.len() > 1024 || password.contains(['\r', '\n', '\0']) {
-        return Err(Error("Invalid mailbox credential"));
-    }
     Ok(())
 }
 
@@ -48,8 +40,7 @@ impl Db {
                 id,
                 name,
                 config: serde_json::from_str(&config).map_err(safe)?,
-                password: Some(Arc::new(Zeroizing::new(password))),
-                credential_status: "ready",
+                password: MailboxCredential::parse(Zeroizing::new(password))?,
             };
             validate(&account)?;
             accounts.push(account);
@@ -78,12 +69,7 @@ impl Db {
             .map_err(safe)?
             .execute(
                 "INSERT INTO runtime_accounts(id,name,config,password) VALUES (?,?,?,?)",
-                params![
-                    account.id,
-                    account.name,
-                    config,
-                    account.password.as_ref().unwrap().as_str()
-                ],
+                params![account.id, account.name, config, account.password.as_str()],
             )
             .map_err(|_| Error("Account could not be saved; no account was activated"))?;
         Ok(())
@@ -134,8 +120,7 @@ pub fn from_form(mut params: crate::auth::Params) -> Result<AccountSettings> {
             )?,
             smtp_enabled: false,
         },
-        password: Some(Arc::new(password)),
-        credential_status: "ready",
+        password: MailboxCredential::parse(password)?,
     };
     validate(&account)?;
     Ok(account)
