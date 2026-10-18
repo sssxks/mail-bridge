@@ -2,6 +2,7 @@
 from pathlib import Path
 import zipfile
 import hashlib
+import tomllib
 
 root = Path(__file__).resolve().parent
 files = [
@@ -12,7 +13,8 @@ files = [
     'src/main.rs', 'src/lib.rs', 'src/config.rs', 'src/db.rs', 'src/bounded_io.rs',
     'src/mail.rs', 'src/auth.rs', 'src/mcp.rs', 'src/http.rs', 'tests/core.rs', 'tests/events.rs', 'src/events.rs', 'src/webhook.rs', 'EVENTS.md',
 ]
-archive = root.parent / 'releases' / 'mail-bridge-rust-http-0.3.0.zip'
+version = tomllib.loads((root / 'Cargo.toml').read_text())['package']['version']
+archive = root.parent / 'releases' / f'mail-bridge-rust-http-{version}.zip'
 archive.parent.mkdir(parents=True, exist_ok=True)
 with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as output:
     for name in files:
