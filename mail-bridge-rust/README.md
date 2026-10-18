@@ -2,8 +2,8 @@
 
 A single-owner, multi-account IMAP/SMTP connector using authenticated HTTP MCP.
 QQ and ZJU examples are included. Source, Cargo.lock, mock tests, Debian 12 amd64
-binary and deployment templates are delivered. This release was built locally;
-the existing remote installation was not upgraded or started.
+binary and deployment templates are delivered. Version 0.3.3 is deployed;
+see [current live status](../docs/STATUS.md) for mailbox, SMTP and rollback checks.
 
 ## What works
 
