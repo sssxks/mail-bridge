@@ -19,6 +19,7 @@ Environment=MAIL_BRIDGE_BIND=127.0.0.1:18765
 UMask=0077
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=70
 MemoryHigh=128M
 MemoryMax=160M
 TasksMax=16
