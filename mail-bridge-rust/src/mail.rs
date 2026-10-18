@@ -333,11 +333,25 @@ impl RealBackend {
         if a.uidvalidity.is_some_and(|v| v != validity) {
             return Err(Error("UIDVALIDITY changed; list this folder again"));
         }
-        let mut upper = a
-            .before_uid
-            .or(selected.uid_next)
-            .ok_or(Error("Server omitted UIDNEXT"))?
-            .saturating_sub(1);
+        let mut upper = if let Some(next) = a.before_uid.or(selected.uid_next) {
+            next.saturating_sub(1)
+        } else if selected.exists == 0 {
+            0
+        } else {
+            // Some servers omit UIDNEXT on EXAMINE. Fetch only the last
+            // message's UID by sequence number; never SEARCH the whole mailbox
+            // or download a body to discover the bounded search window.
+            let mut stream = session.fetch("*", "(UID)").await.map_err(safe)?;
+            let mut highest = None;
+            while let Some(fetch) = stream.try_next().await.map_err(safe)? {
+                if let Some(uid) = fetch.uid.filter(|uid| *uid > 0) {
+                    highest = Some(highest.unwrap_or(0).max(uid));
+                }
+            }
+            highest.ok_or(Error(
+                "Server omitted last message UID; list this folder again",
+            ))?
+        };
         let mut uids = Vec::new();
         let mut next = None;
         // Bounded UID windows, never materialize an all-mailbox SEARCH result.

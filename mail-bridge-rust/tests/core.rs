@@ -184,6 +184,78 @@ fn input_controls() {
     assert!(mail_bridge_rust::auth::form(b"scope=mail%3Aread&scope=mail%3Asend").is_err());
 }
 #[tokio::test]
+async fn missing_uidnext_uses_bounded_uid_fetch() {
+    for (name, extra) in [
+        ("list_messages", json!({})),
+        (
+            "search_messages",
+            json!({"field":"SUBJECT", "query":"hello"}),
+        ),
+    ] {
+        let mut args = json!({"limit":1});
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let (mut session, handle) = mock_imap(vec![
+            login(),
+            (
+                "EXAMINE".into(),
+                "* 3 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n%TAG% OK opened\r\n".into(),
+            ),
+            (
+                " FETCH * (UID)".into(),
+                "* 3 FETCH (UID 4096)\r\n%TAG% OK fetched\r\n".into(),
+            ),
+            (
+                if name == "search_messages" {
+                    "UID SEARCH UID 3073:4096 SUBJECT \"hello\""
+                } else {
+                    "UID SEARCH UID 3073:4096"
+                }
+                .into(),
+                "* SEARCH 4096\r\n%TAG% OK searched\r\n".into(),
+            ),
+            fetch(4096, "HEADER", RAW),
+        ])
+        .await;
+        let page = RealBackend::read_session(&mut session, name, args)
+            .await
+            .unwrap();
+        assert_eq!(page["messages"][0]["uid"], 4096);
+        assert_eq!(page["uidvalidity"], 77);
+        handle.await.unwrap();
+    }
+    let (mut session, handle) = mock_imap(vec![
+        login(),
+        (
+            "EXAMINE".into(),
+            "* 0 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n%TAG% OK opened\r\n".into(),
+        ),
+    ])
+    .await;
+    let page = RealBackend::read_session(&mut session, "list_messages", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(page["messages"], json!([]));
+    assert!(page["next_before_uid"].is_null());
+    handle.await.unwrap();
+    let (mut session, handle) = mock_imap(vec![
+        login(),
+        (
+            "EXAMINE".into(),
+            "* 3 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n%TAG% OK opened\r\n".into(),
+        ),
+        (" FETCH * (UID)".into(), "%TAG% OK vanished\r\n".into()),
+    ])
+    .await;
+    assert!(
+        RealBackend::read_session(&mut session, "list_messages", json!({}))
+            .await
+            .is_err()
+    );
+    handle.await.unwrap();
+}
+#[tokio::test]
 async fn uid_pages_and_readonly_peek() {
     let script = vec![
         login(),
