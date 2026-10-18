@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>添加邮箱 · Mail Bridge</title>
+<h1>添加邮箱</h1>
+<p>请输入邮箱服务商提供的 IMAP 信息。密码直接提交到你的 Mail Bridge 服务，不会返回聊天。</p>
+<p>保存后配置立即生效，无需重启。保存不会登录邮箱；首次读取时才会验证连接。新账户的发信和新邮件订阅保持关闭。</p>
+<form method="post" action="/accounts/setup">
+<input type="hidden" name="ticket" value="{{ticket}}">
+<input type="hidden" name="_csrf" value="{{csrf}}">
+<fieldset><legend>邮箱账户</legend>
+<p><label>账户 ID <input name="account_id" required maxlength="32" pattern="[a-z0-9_-]{1,32}" placeholder="personal" autocomplete="off"></label> 使用小写字母、数字、下划线或连字符；不能与现有账户重复。</p>
+<p><label>显示名称 <input name="name" required maxlength="80" placeholder="个人邮箱"></label></p>
+<p><label>邮箱地址 <input type="email" name="email" required maxlength="254" autocomplete="email"></label></p>
+<p><label>登录用户名（留空使用邮箱地址）<input name="username" maxlength="254" autocomplete="username"></label></p>
+<p><label>IMAP 服务器 <input name="imap_host" required maxlength="253" placeholder="imap.example.com"></label></p>
+<p><label>IMAP 端口 <input type="number" name="imap_port" min="1" max="65535" value="993" required></label></p>
+<p><label>IMAP 加密 <select name="imap_security"><option value="tls">TLS（通常端口 993）</option><option value="starttls">STARTTLS（通常端口 143）</option></select></label></p>
+<p><label>邮箱客户端密码 / 授权码 <input type="password" name="password" required maxlength="1024" autocomplete="new-password"></label></p>
+</fieldset>
+<details><summary>可选：保存 SMTP 服务器信息（发信仍保持关闭）</summary>
+<p><label>SMTP 服务器 <input name="smtp_host" maxlength="253" placeholder="smtp.example.com"></label></p>
+<p><label>SMTP 端口 <input type="number" name="smtp_port" min="1" max="65535" value="465"></label></p>
+<p><label>SMTP 加密 <select name="smtp_security"><option value="tls">TLS</option><option value="starttls">STARTTLS</option></select></label></p>
+</details>
+<fieldset><legend>确认添加</legend>
+<p><label>服务 owner 密码 <input type="password" name="owner_password" required minlength="32" maxlength="256" autocomplete="off"></label></p>
+<p>这是授权 Mail Bridge 时使用的独立服务密码，与邮箱密码不同。</p>
+<button type="submit">保存并启用账户配置</button>
+</fieldset>
+</form>
+</html>

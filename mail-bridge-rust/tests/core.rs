@@ -9,7 +9,7 @@ use mail_bridge_rust::{
     Error, Result,
     auth::{Auth, Params},
     bounded_io::GuardIo,
-    config::{AccountSettings, Config, Security, Settings, load_accounts},
+    config::{Config, Security, Settings},
     db::{Db, hash},
     http::router,
     mail::{
@@ -49,8 +49,8 @@ impl Backend for Fake {
         })
     }
 }
-fn settings(path: &Path) -> Settings {
-    let config = Config {
+fn mock_config() -> Config {
+    Config {
         username: "mock@example.com".into(),
         from_address: "mock@example.com".into(),
         imap_host: "imap.example.com".into(),
@@ -60,15 +60,10 @@ fn settings(path: &Path) -> Settings {
         smtp_port: 465,
         smtp_security: Security::Tls,
         smtp_enabled: true,
-    };
+    }
+}
+fn settings(path: &Path) -> Settings {
     Settings {
-        accounts: vec![AccountSettings {
-            id: "qq".into(),
-            name: "Mock QQ".into(),
-            config,
-            password: Some(Arc::new(Zeroizing::new("mock-mailbox-only".into()))),
-            credential_status: "ready",
-        }],
         owner_password: Arc::new(Zeroizing::new(
             "mock-owner-password-0000000000000000".into(),
         )),
@@ -86,12 +81,12 @@ fn setup() -> (tempfile::TempDir, Settings, Db, Arc<Fake>, Arc<MailService>) {
     let account = MailAccount {
         id: "qq".into(),
         name: "Mock QQ".into(),
-        config: settings.accounts[0].config.clone(),
+        config: mock_config(),
         backend: Some(fake.clone()),
         credential_status: "ready",
     };
     let service = Arc::new(MailService {
-        accounts: [("qq".into(), account)].into(),
+        accounts: Arc::new(std::sync::RwLock::new([("qq".into(), account)].into())),
         db: db.clone(),
         gate: Arc::new(tokio::sync::Semaphore::new(1)),
     });
@@ -749,7 +744,7 @@ async fn oauth_pkce_mcp_and_scope_for_callback(callback: &str) {
     )
     .await;
     let listed: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 8);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 10);
     let(_,_,bytes)=request(app.clone(),"/mcp","POST",json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"prepare_draft","arguments":{"account_id":"qq","to":["a@example.com"],"subject":"subject","body":"body"}}}).to_string(),Some(token),None,None).await;
     assert_eq!(
         serde_json::from_slice::<Value>(&bytes).unwrap()["result"]["isError"],
@@ -817,73 +812,23 @@ async fn local_http_socket_smoke() {
     server.abort();
 }
 
-#[test]
-fn independent_password_files_and_legacy_config() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("qq"), "mock-qq-client-password").unwrap();
-    let raw = include_bytes!("../config.example.json");
-    let accounts = load_accounts(raw, dir.path(), "", None).unwrap();
-    assert_eq!(accounts.len(), 2);
-    assert_eq!(accounts[0].credential_status, "ready");
-    assert_eq!(accounts[1].credential_status, "missing");
-    assert_eq!(accounts[1].config.smtp_port, 994);
-    std::fs::write(dir.path().join("zju"), "mock-zju-client-password").unwrap();
-    let accounts = load_accounts(raw, dir.path(), "", None).unwrap();
-    assert_eq!(
-        accounts[0].password.as_ref().unwrap().as_str(),
-        "mock-qq-client-password"
-    );
-    assert_eq!(
-        accounts[1].password.as_ref().unwrap().as_str(),
-        "mock-zju-client-password"
-    );
-    let mut duplicate: Value = serde_json::from_slice(raw).unwrap();
-    duplicate["accounts"][1]["id"] = json!("qq");
-    assert!(
-        load_accounts(
-            &serde_json::to_vec(&duplicate).unwrap(),
-            dir.path(),
-            "",
-            None
-        )
-        .is_err()
-    );
-    duplicate["accounts"][1]["id"] = json!("../other");
-    assert!(
-        load_accounts(
-            &serde_json::to_vec(&duplicate).unwrap(),
-            dir.path(),
-            "",
-            None
-        )
-        .is_err()
-    );
-    let legacy = serde_json::to_vec(&settings(dir.path()).accounts[0].config).unwrap();
-    let old = load_accounts(&legacy, dir.path(), "", Some("mock-legacy-password".into())).unwrap();
-    assert_eq!(old[0].id, "default");
-    assert_eq!(old[0].credential_status, "ready");
-    std::fs::write(dir.path().join("mailboxes_qq"), "mock-systemd-qq").unwrap();
-    let systemd = load_accounts(raw, dir.path(), "mailboxes_", None).unwrap();
-    assert_eq!(
-        systemd[0].password.as_ref().unwrap().as_str(),
-        "mock-systemd-qq"
-    );
-    assert_eq!(systemd[1].credential_status, "missing");
-}
-
 #[tokio::test]
 async fn two_account_sender_and_request_id_isolation() {
     let (dir, _settings, _db, qq, original) = setup();
     let mut service = (*original).clone();
     let zju = Arc::new(Fake::default());
-    let mut account = service.accounts["qq"].clone();
+    let mut account = service.accounts.read().unwrap()["qq"].clone();
     account.id = "zju".into();
     account.name = "Mock ZJU".into();
     account.config.username = "school@zju.example".into();
     account.config.from_address = "school@zju.example".into();
     account.config.smtp_port = 994;
     account.backend = Some(zju.clone());
-    service.accounts.insert("zju".into(), account);
+    service
+        .accounts
+        .write()
+        .unwrap()
+        .insert("zju".into(), account);
     let listed = service.dispatch("list_accounts", json!({})).await.unwrap();
     assert_eq!(listed["accounts"].as_array().unwrap().len(), 2);
     assert!(!listed.to_string().contains("mock-mailbox-only"));
@@ -938,8 +883,20 @@ async fn two_account_sender_and_request_id_isolation() {
             .await
             .is_err()
     );
-    service.accounts.get_mut("zju").unwrap().backend = None;
-    service.accounts.get_mut("zju").unwrap().credential_status = "missing";
+    service
+        .accounts
+        .write()
+        .unwrap()
+        .get_mut("zju")
+        .unwrap()
+        .backend = None;
+    service
+        .accounts
+        .write()
+        .unwrap()
+        .get_mut("zju")
+        .unwrap()
+        .credential_status = "missing";
     let status = service
         .dispatch("configuration_status", json!({"account_id":"zju"}))
         .await
@@ -954,7 +911,13 @@ async fn two_account_sender_and_request_id_isolation() {
     assert_eq!(qq.sent.load(Ordering::SeqCst), 1);
     assert_eq!(zju.sent.load(Ordering::SeqCst), 1);
     for tool in mail_bridge_rust::mcp::tools() {
-        if tool.name != "configuration_status" && tool.name != "list_accounts" {
+        if !matches!(
+            tool.name.as_ref(),
+            "configuration_status"
+                | "list_accounts"
+                | "begin_account_setup"
+                | "account_setup_status"
+        ) {
             assert!(
                 tool.input_schema["required"]
                     .as_array()

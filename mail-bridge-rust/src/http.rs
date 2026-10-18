@@ -32,6 +32,8 @@ use tokio::{
 
 #[derive(Clone)]
 pub struct App {
+    pub setup: Arc<crate::account_setup::AccountSetup>,
+    pub mail: Arc<MailService>,
     pub auth: Arc<Auth>,
     pub requests: Arc<Semaphore>,
     pub attempts: Arc<Mutex<Vec<Instant>>>,
@@ -241,6 +243,83 @@ fn is_form(headers: &HeaderMap) -> bool {
         .and_then(|v| v.to_str().ok())
         .is_some_and(|s| s.split(';').next() == Some("application/x-www-form-urlencoded"))
 }
+fn setup_response(page: String) -> Response {
+    let mut response = Response::new(Body::from(page));
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        header::HeaderValue::from_static("strict-origin"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        header::HeaderValue::from_static(
+            "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+        ),
+    );
+    headers.insert(
+        header::X_FRAME_OPTIONS,
+        header::HeaderValue::from_static("DENY"),
+    );
+    response
+}
+async fn setup_page(State(state): State<App>, RawQuery(query): RawQuery) -> Response {
+    let result = form(query.unwrap_or_default().as_bytes()).and_then(|params| {
+        if params.len() != 1 {
+            return Err(crate::Error("Invalid setup link"));
+        }
+        state
+            .setup
+            .page(crate::auth::val(&params, "ticket")?, &state.auth)
+    });
+    match result {
+        Ok((page, cookie)) => {
+            let mut response = setup_response(page);
+            response.headers_mut().insert(
+                header::SET_COOKIE,
+                cookie.parse().expect("random setup cookie"),
+            );
+            response
+        }
+        Err(_) => error(StatusCode::BAD_REQUEST),
+    }
+}
+async fn setup_save(State(state): State<App>, headers: HeaderMap, body: Bytes) -> Response {
+    if body.len() > 16384
+        || !is_form(&headers)
+        || headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())
+            != Some(state.auth.base.as_str())
+    {
+        return error(StatusCode::FORBIDDEN);
+    }
+    {
+        let mut attempts = state.attempts.lock().unwrap_or_else(|e| e.into_inner());
+        attempts.retain(|t| t.elapsed() < Duration::from_secs(60));
+        if attempts.len() >= 10 {
+            return error(StatusCode::TOO_MANY_REQUESTS);
+        }
+        attempts.push(Instant::now());
+    }
+    let cookie = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| {
+            s.split(';')
+                .find_map(|c| c.trim().strip_prefix("__Host-mail-bridge-setup="))
+        })
+        .unwrap_or("");
+    match form(&body).and_then(|params| state.setup.submit(params, cookie, &state.auth, &state.mail)) {
+        Ok(id) => {
+            let mut response = setup_response(format!("<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><title>邮箱已添加</title><h1>邮箱已添加</h1><p>账户 {} 的配置已保存并立即生效，无需重启。</p><p>尚未验证邮箱登录，发信保持关闭。你可以返回聊天检查配置或请求读取邮件。</p></html>", html_escape::encode_text(&id)));
+            response.headers_mut().insert(header::SET_COOKIE, header::HeaderValue::from_static("__Host-mail-bridge-setup=; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"));
+            response
+        },
+        Err(e) => (StatusCode::BAD_REQUEST, setup_response(format!("<!doctype html><meta charset=\"utf-8\"><title>添加未完成</title><h1>添加未完成</h1><p>{}</p><p>请返回上一页重新填写；不要将密码粘贴到聊天。</p>", html_escape::encode_text(e.0)))).into_response(),
+    }
+}
 async fn authorize(State(state): State<App>, headers: HeaderMap, body: Bytes) -> Response {
     if body.len() > 16384
         || !is_form(&headers)
@@ -301,12 +380,19 @@ pub fn router_with_events(
     events: Option<Arc<crate::events::Events>>,
 ) -> Router {
     let state = App {
+        setup: Arc::new(crate::account_setup::AccountSetup::default()),
+        mail: mail.clone(),
         auth: auth.clone(),
         requests: Arc::new(Semaphore::new(4)),
         attempts: Arc::new(Mutex::new(Vec::new())),
         events: events.clone(),
     };
-    let mcp = Mcp { auth, mail, events };
+    let mcp = Mcp {
+        auth,
+        mail,
+        events,
+        setup: state.setup.clone(),
+    };
     let url = url::Url::parse(&settings.public_url).expect("validated URL");
     let mut config = StreamableHttpServerConfig::default()
         .with_json_response(true)
@@ -333,6 +419,7 @@ pub fn router_with_events(
         .route("/oauth/register", post(register))
         .route("/oauth/authorize", get(consent).post(authorize))
         .route("/oauth/token", post(exchange))
+        .route("/accounts/setup", get(setup_page).post(setup_save))
         .with_state(state.clone())
         .merge(mcp_routes)
         .layer(DefaultBodyLimit::max(65536))

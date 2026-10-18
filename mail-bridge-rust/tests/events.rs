@@ -135,7 +135,6 @@ fn setup() -> (
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(&dir.path().join("events.db")).unwrap();
     let settings = Settings {
-        accounts: vec![],
         owner_password: Arc::new(Zeroizing::new(
             "test-owner-placeholder-0000000000000000".into(),
         )),
@@ -324,13 +323,16 @@ async fn unsubscribe_expiry_revocation_uidvalidity_and_rotation() {
     assert!(events.get(&id).unwrap().is_none());
     assert!(!events.deliver_once(&id).await.unwrap());
     accepted(events.subscribe("owner", request("qq")).await);
-    mail.set("qq",2,503);
+    mail.set("qq", 2, 503);
     events.scan_once(&id).await.unwrap();
-    assert_eq!(pending(&db),1);
-    db.0.lock().unwrap().execute("UPDATE event_subscriptions SET expires=0",[]).unwrap();
-    accepted(events.subscribe("owner",request("qq")).await);
-    assert_eq!(pending(&db),0);
-    assert_eq!(events.get(&id).unwrap().unwrap().uid,502);
+    assert_eq!(pending(&db), 1);
+    db.0.lock()
+        .unwrap()
+        .execute("UPDATE event_subscriptions SET expires=0", [])
+        .unwrap();
+    accepted(events.subscribe("owner", request("qq")).await);
+    assert_eq!(pending(&db), 0);
+    assert_eq!(events.get(&id).unwrap().unwrap().uid, 502);
     db.0.lock()
         .unwrap()
         .execute("UPDATE event_subscriptions SET expires=0", [])
@@ -354,8 +356,12 @@ async fn unsubscribe_expiry_revocation_uidvalidity_and_rotation() {
         -32024
     );
     db.revoke_oauth().unwrap();
-    let proofs:i64=db.0.lock().unwrap().query_row("SELECT count(*) FROM event_verifications",[],|r|r.get(0)).unwrap();
-    assert_eq!(proofs,0);
+    let proofs: i64 =
+        db.0.lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM event_verifications", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(proofs, 0);
 }
 #[tokio::test]
 async fn bounded_queue_and_terminal_delivery_failures() {
@@ -435,7 +441,7 @@ async fn actual_mcp2026_discovery_catalog_subscribe_and_scope_challenge() {
             .unwrap();
     }
     let mail = Arc::new(mail_bridge_rust::mail::MailService {
-        accounts: BTreeMap::new(),
+        accounts: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
         db: db.clone(),
         gate: Arc::new(tokio::sync::Semaphore::new(1)),
     });

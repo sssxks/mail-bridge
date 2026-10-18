@@ -2,7 +2,6 @@
 use crate::{
     Error, Result,
     auth::Auth,
-    config::AccountSettings,
     db::{Db, hash, now},
     mail::{RealBackend, utf7_encode},
     safe,
@@ -13,7 +12,7 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -89,36 +88,30 @@ pub trait Source: Send + Sync {
     fn wait<'a>(&'a self, filters: &'a Filters) -> BoxFuture<'a, Result<()>>;
 }
 pub struct ImapSource {
-    accounts: BTreeMap<String, RealBackend>,
+    db: Db,
 }
 impl ImapSource {
-    pub fn new(accounts: &[AccountSettings]) -> Self {
-        Self {
-            accounts: accounts
-                .iter()
-                .filter_map(|a| {
-                    a.password.as_ref().map(|password| {
-                        (
-                            a.id.clone(),
-                            RealBackend {
-                                config: a.config.clone(),
-                                password: password.clone(),
-                            },
-                        )
-                    })
-                })
-                .collect(),
-        }
+    pub fn new(db: Db) -> Self {
+        Self { db }
     }
-    fn account(&self, id: &str) -> Result<&RealBackend> {
-        self.accounts
-            .get(id)
-            .ok_or(Error("Account unavailable for events"))
+    fn account(&self, id: &str) -> Result<RealBackend> {
+        let account = self
+            .db
+            .runtime_accounts()?
+            .into_iter()
+            .find(|a| a.id == id)
+            .ok_or(Error("Account unavailable for events"))?;
+        Ok(RealBackend {
+            config: account.config,
+            password: account
+                .password
+                .ok_or(Error("Account unavailable for events"))?,
+        })
     }
 }
 impl Source for ImapSource {
     fn available(&self, id: &str) -> bool {
-        self.accounts.contains_key(id)
+        self.account(id).is_ok()
     }
     fn snapshot<'a>(&'a self, f: &'a Filters) -> BoxFuture<'a, Result<Snapshot>> {
         Box::pin(async move {
@@ -226,12 +219,22 @@ impl Events {
         })
     }
     pub fn catalog(&self) -> Value {
-        json!({"events":[{"name":EVENT,"description":"A newly observed IMAP message in one explicitly selected account/mailbox. No body, subject or sender is pushed. No historical replay.","delivery":["webhook"],"inputSchema":{"type":"object","properties":{"account_id":{"type":"string","enum":self.ids},"mailbox":{"type":"string","minLength":1,"maxLength":512}},"required":["account_id","mailbox"],"additionalProperties":false},"payloadSchema":{"type":"object","properties":{"account_id":{"type":"string"},"mailbox":{"type":"string"},"message_id":{"type":"string"},"uid":{"type":"integer"},"uidvalidity":{"type":"integer"}},"required":["account_id","mailbox","message_id","uid","uidvalidity"],"additionalProperties":false},"_meta":{"securitySchemes":[{"type":"oauth2","scopes":["mail:read","mail:events"]}]}}]})
+        let mut ids = self.ids.clone();
+        if let Ok(runtime) = self.db.runtime_account_ids() {
+            ids.extend(runtime);
+            ids.sort();
+            ids.dedup();
+        }
+        json!({"events":[{"name":EVENT,"description":"A newly observed IMAP message in one explicitly selected account/mailbox. No body, subject or sender is pushed. No historical replay.","delivery":["webhook"],"inputSchema":{"type":"object","properties":{"account_id":{"type":"string","enum":ids},"mailbox":{"type":"string","minLength":1,"maxLength":512}},"required":["account_id","mailbox"],"additionalProperties":false},"payloadSchema":{"type":"object","properties":{"account_id":{"type":"string"},"mailbox":{"type":"string"},"message_id":{"type":"string"},"uid":{"type":"integer"},"uidvalidity":{"type":"integer"}},"required":["account_id","mailbox","message_id","uid","uidvalidity"],"additionalProperties":false},"_meta":{"securitySchemes":[{"type":"oauth2","scopes":["mail:read","mail:events"]}]}}]})
     }
     fn checked(&self, request: &Subscribe, with_secret: bool) -> Result<String> {
         if request.name != EVENT
             || request.delivery.mode != "webhook"
-            || !self.ids.contains(&request.arguments.account_id)
+            || !(self.ids.contains(&request.arguments.account_id)
+                || self
+                    .db
+                    .runtime_account_ids()?
+                    .contains(&request.arguments.account_id))
         {
             return Err(Error("Invalid event or account"));
         }
@@ -460,7 +463,9 @@ impl Events {
             let snapshot = snapshot.ok_or_else(EventError::upstream)?;
             // An expired identity starts from now; its old pending deliveries
             // must not leak into a newly granted subscription.
-            db.execute("DELETE FROM event_outbox WHERE sub=?",[&id]).map_err(safe).map_err(EventError::internal)?;
+            db.execute("DELETE FROM event_outbox WHERE sub=?", [&id])
+                .map_err(safe)
+                .map_err(EventError::internal)?;
             (
                 snapshot.validity,
                 snapshot.next_uid.saturating_sub(1),

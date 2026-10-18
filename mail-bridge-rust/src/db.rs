@@ -23,14 +23,28 @@ impl Db {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(safe)?;
         }
-        let db = Connection::open(path).map_err(safe)?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                    .map_err(safe)?;
+            }
+            // Create with private permissions, including the interval before SQLite opens it.
+            std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .mode(0o600)
+                .open(path)
+                .map_err(safe)?;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(safe)?;
         }
+        let db = Connection::open(path).map_err(safe)?;
         db.busy_timeout(Duration::from_millis(100)).map_err(safe)?;
         db.execute_batch("PRAGMA synchronous=FULL; PRAGMA cache_size=-1024; PRAGMA temp_store=MEMORY;
+            CREATE TABLE IF NOT EXISTS runtime_accounts(id TEXT PRIMARY KEY,name TEXT NOT NULL,config TEXT NOT NULL,password TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS clients(id TEXT PRIMARY KEY,redirects TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS codes(hash TEXT PRIMARY KEY,client TEXT,redirect TEXT,challenge TEXT,resource TEXT,scope TEXT,expires INTEGER);
             CREATE TABLE IF NOT EXISTS tokens(hash TEXT PRIMARY KEY,kind TEXT,client TEXT,resource TEXT,scope TEXT,expires INTEGER);

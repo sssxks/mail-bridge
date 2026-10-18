@@ -69,6 +69,30 @@ pub struct Auth {
     owner: Arc<Zeroizing<String>>,
 }
 impl Auth {
+    pub fn verify_owner(&self, password: &str) -> bool {
+        eq(password, &self.owner)
+    }
+    pub fn setup_grant_active(&self, client: &str) -> Result<bool> {
+        let db = self.db.0.lock().map_err(safe)?;
+        let mut query = db
+            .prepare("SELECT scope FROM tokens WHERE client=? AND resource=? AND expires>?")
+            .map_err(safe)?;
+        let rows = query
+            .query_map(params![client, self.resource, now()], |r| {
+                r.get::<_, String>(0)
+            })
+            .map_err(safe)?;
+        for row in rows {
+            if row
+                .map_err(safe)?
+                .split_whitespace()
+                .any(|s| s == "mail:read")
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
     pub fn redirect_allowed(&self, redirect: &str) -> bool {
         let Ok(candidate) = validate_oauth_redirect(redirect) else {
             return false;

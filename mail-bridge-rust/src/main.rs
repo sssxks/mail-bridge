@@ -21,17 +21,15 @@ fn run() -> mail_bridge_rust::Result<()> {
         return Ok(());
     }
     let auth = Arc::new(Auth::new(&settings, db.clone()));
-    let mail = Arc::new(MailService::new(settings.accounts.clone(), db.clone()));
+    let mail = Arc::new(MailService::from_store(db.clone())?);
     let events =
         if std::env::var("MAIL_BRIDGE_EVENTS_ENABLED").is_ok_and(|v| v == "true" || v == "1") {
             Some(Arc::new(mail_bridge_rust::events::Events::new(
-                db,
+                db.clone(),
                 auth.clone(),
-                Arc::new(mail_bridge_rust::events::ImapSource::new(
-                    &settings.accounts,
-                )),
+                Arc::new(mail_bridge_rust::events::ImapSource::new(db.clone())),
                 Arc::new(mail_bridge_rust::webhook::HttpsTransport),
-                settings.accounts.iter().map(|a| a.id.clone()).collect(),
+                vec![],
             )?))
         } else {
             None

@@ -9,6 +9,7 @@ pub struct Scopes(pub Vec<String>);
 pub struct Principal(pub String);
 #[derive(Clone)]
 pub struct Mcp {
+    pub setup: Arc<crate::account_setup::AccountSetup>,
     pub mail: Arc<MailService>,
     pub auth: Arc<Auth>,
     pub events: Option<Arc<crate::events::Events>>,
@@ -25,6 +26,18 @@ pub fn tools() -> Vec<Tool> {
     send["confirm_send"] = json!({"type":"boolean"});
     send["request_id"] = json!({"type":"string","pattern":"^[A-Za-z0-9_-]{16,80}$"});
     let definitions = [
+        (
+            "begin_account_setup",
+            "When the user asks to add a mailbox, create a private owner-confirmed setup link valid for 10 minutes. Open the link to enter IMAP settings and credentials; never collect passwords in chat. Saving is immediate and does not test login or enable SMTP/events.",
+            json!({}),
+            vec![],
+        ),
+        (
+            "account_setup_status",
+            "Inspect this connection's setup invitation by setup_id. Reports pending or saved without returning credentials. Saved configuration does not prove mailbox login.",
+            json!({"setup_id":{"type":"string","minLength":1,"maxLength":64}}),
+            vec!["setup_id"],
+        ),
         (
             "configuration_status",
             "Inspect all accounts or one explicit account_id without returning secrets or connecting. Does not test credentials.",
@@ -75,12 +88,13 @@ pub fn tools() -> Vec<Tool> {
         ),
     ];
     definitions.into_iter().map(|(name,description,mut properties,mut required)|{
-        if name!="list_accounts" && name!="configuration_status" {
+        if !matches!(name, "list_accounts" | "configuration_status" | "begin_account_setup" | "account_setup_status") {
             properties["account_id"]=json!({"type":"string","pattern":"^[a-z0-9_-]{1,32}$"});
             required.push("account_id");
         }
         let write=name=="send_email";
-        let value=json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},"annotations":{"readOnlyHint":!write,"destructiveHint":write,"idempotentHint":!write,"openWorldHint":true},"_meta":{"securitySchemes":[{"type":"oauth2","scopes":[if write{"mail:send"}else{"mail:read"}]}]}});
+        let creates_setup=name=="begin_account_setup";
+        let value=json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},"annotations":{"readOnlyHint":!write&&!creates_setup,"destructiveHint":write,"idempotentHint":!write&&!creates_setup,"openWorldHint":true},"_meta":{"securitySchemes":[{"type":"oauth2","scopes":[if write{"mail:send"}else{"mail:read"}]}]}});
         serde_json::from_value(value).expect("static tool definition")
     }).collect()
 }
@@ -213,7 +227,35 @@ impl ServerHandler for Mcp {
             return Ok(result.into());
         }
         let args = Value::Object(request.arguments.unwrap_or_default());
-        let result = match self.mail.dispatch(&request.name, args).await {
+        let outcome = if matches!(
+            request.name.as_ref(),
+            "begin_account_setup" | "account_setup_status"
+        ) {
+            let client = context
+                .extensions
+                .get::<axum::http::request::Parts>()
+                .and_then(|p| p.extensions.get::<Principal>());
+            match (request.name.as_ref(), client) {
+                ("begin_account_setup", Some(client))
+                    if args.as_object().is_some_and(|v| v.is_empty()) =>
+                {
+                    self.setup.begin(&client.0, &self.auth.base)
+                }
+                ("account_setup_status", Some(client))
+                    if args.as_object().is_some_and(|v| v.len() == 1)
+                        && args["setup_id"].as_str().is_some_and(|v| v.len() <= 64) =>
+                {
+                    self.setup
+                        .status(&client.0, args["setup_id"].as_str().unwrap())
+                }
+                _ => Err(crate::Error(
+                    "Invalid setup arguments or missing authenticated connection",
+                )),
+            }
+        } else {
+            self.mail.dispatch(&request.name, args).await
+        };
+        let result = match outcome {
             Ok(value) => {
                 let encoded = serde_json::to_string(&value).unwrap_or_default();
                 if encoded.len() > 100000 {

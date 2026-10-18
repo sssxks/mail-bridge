@@ -178,6 +178,7 @@ pub trait Backend: Send + Sync {
     fn read<'a>(&'a self, name: &'a str, args: Value) -> BoxFuture<'a, Result<Value>>;
     fn send(&self, message: Message) -> BoxFuture<'_, Result<()>>;
 }
+#[derive(Clone)]
 pub struct RealBackend {
     pub config: Config,
     pub password: Arc<Zeroizing<String>>,
@@ -552,7 +553,7 @@ impl MailAccount {
 }
 #[derive(Clone)]
 pub struct MailService {
-    pub accounts: std::collections::BTreeMap<String, MailAccount>,
+    pub accounts: Arc<std::sync::RwLock<std::collections::BTreeMap<String, MailAccount>>>,
     pub db: Db,
     pub gate: Arc<Semaphore>,
 }
@@ -581,10 +582,46 @@ impl MailService {
             })
             .collect();
         Self {
-            accounts,
+            accounts: Arc::new(std::sync::RwLock::new(accounts)),
             db,
             gate: Arc::new(Semaphore::new(1)),
         }
+    }
+    pub fn from_store(db: Db) -> Result<Self> {
+        let accounts = db.runtime_accounts()?;
+        if accounts.len() > 8 {
+            return Err(Error("Configure at most 8 accounts"));
+        }
+        Ok(Self::new(accounts, db))
+    }
+    pub fn add_account(&self, account: crate::config::AccountSettings) -> Result<()> {
+        crate::accounts::validate(&account)?;
+        if account.config.smtp_enabled {
+            return Err(Error("New accounts must have SMTP disabled"));
+        }
+        let mut accounts = self.accounts.write().map_err(safe)?;
+        if accounts.contains_key(&account.id) {
+            return Err(Error("Account ID already exists; choose a new ID"));
+        }
+        if accounts.len() >= 8 {
+            return Err(Error("Configure at most 8 accounts"));
+        }
+        self.db.insert_runtime_account(&account)?;
+        let backend = Arc::new(RealBackend {
+            config: account.config.clone(),
+            password: account.password.expect("validated password"),
+        });
+        accounts.insert(
+            account.id.clone(),
+            MailAccount {
+                id: account.id,
+                name: account.name,
+                config: account.config,
+                backend: Some(backend),
+                credential_status: "ready",
+            },
+        );
+        Ok(())
     }
     pub async fn dispatch(&self, name: &str, mut args: Value) -> Result<Value> {
         if name == "list_accounts" || name == "configuration_status" {
@@ -594,19 +631,20 @@ impl MailService {
             {
                 return Err(Error("Unexpected arguments"));
             }
+            let accounts = self.accounts.read().map_err(safe)?;
             let statuses = if let Some(id) = object.get("account_id") {
                 let id = id.as_str().ok_or(Error("Invalid account_id"))?;
                 vec![
-                    self.accounts
+                    accounts
                         .get(id)
                         .ok_or(Error("Unknown account_id; use list_accounts"))?
                         .status(),
                 ]
             } else {
-                self.accounts.values().map(MailAccount::status).collect()
+                accounts.values().map(MailAccount::status).collect()
             };
             return Ok(
-                json!({"accounts":statuses,"account_count":self.accounts.len(),"max_mail_bytes":MAX_MAIL,"mail_concurrency":1,"transport":"streamable_http"}),
+                json!({"accounts":statuses,"account_count":accounts.len(),"max_mail_bytes":MAX_MAIL,"mail_concurrency":1,"transport":"streamable_http"}),
             );
         }
         let account_id = args
@@ -619,12 +657,15 @@ impl MailService {
             ))?;
         let account = self
             .accounts
+            .read()
+            .map_err(safe)?
             .get(&account_id)
+            .cloned()
             .ok_or(Error("Unknown account_id; use list_accounts"))?;
         let _permit = self.gate.clone().try_acquire_owned().map_err(|_| {
             Error("Mail operation busy; try later. Do not retry an uncertain send.")
         })?;
-        let mut result=tokio::time::timeout(Duration::from_secs(45),self.inner(name,args,account)).await.map_err(|_|Error("Mail operation timed out. A send may already have been accepted; never automatically retry."))??;
+        let mut result=tokio::time::timeout(Duration::from_secs(45),self.inner(name,args,&account)).await.map_err(|_|Error("Mail operation timed out. A send may already have been accepted; never automatically retry."))??;
         result
             .as_object_mut()
             .ok_or(Error("Invalid mail response"))?
