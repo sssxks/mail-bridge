@@ -8,7 +8,6 @@ SMTP sending. Optional signed new-mail events are implemented and default off.
 |---|---|
 | `mail-bridge-rust/` | Main Rust 0.3 implementation, Cargo.lock, tests and deployment templates |
 | `mail-bridge-private/` | Private plugin source, remote MCP configuration and manual setup script |
-| `mail-bridge/` | Original Python 0.1 reference implementation |
 | `docs/` | Deployment/connection handoff and release index |
 | `releases/` | Local ZIP deliverables; intentionally excluded from Git |
 

@@ -1,4 +1,0 @@
-# Replace mail.example.com with an owned domain. Point DNS at your TCP-capable host.
-mail.example.com {
-    reverse_proxy 127.0.0.1:8080
-}
