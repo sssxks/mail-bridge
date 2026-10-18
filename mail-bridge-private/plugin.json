@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "mail-bridge-private",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Private multi-account IMAP reading, explicit SMTP drafts/sending, and optional new-mail events through the owner-hosted Mail Bridge.",
   "author": {
     "name": "Mailbox owner"

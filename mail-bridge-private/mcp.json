@@ -3,23 +3,7 @@
   "mcpServers": {
     "mail-bridge": {
       "type": "streamable-http",
-      "url": "https://mail.example.com/mcp",
-      "extensions": {
-        "com.openai": {
-          "auth": {
-            "type": "oauth",
-            "client": {
-              "mode": "dcr"
-            },
-            "baseScopes": [
-              "mail:read"
-            ],
-            "defaultScopes": [
-              "mail:read"
-            ]
-          }
-        }
-      }
+      "url": "https://mail.example.com/mcp"
     }
   }
 }

@@ -1,8 +1,8 @@
-# Mail Bridge private plugin 0.3
+# Mail Bridge private plugin 0.3.1
 
 此包连接已有服务 https://mail.example.com/mcp，采用 Streamable HTTP + OAuth/DCR。
 它不托管服务器、不包含邮箱密码，也不代表已完成平台 OAuth 或真实邮箱联通。
-服务器升级后仍停止且未设开机启动；SMTP 和事件保持关闭。
+服务是否运行以实时检查为准；SMTP 和事件保持关闭。已有配置无需重新输入密码。
 
 ## 用户最后需要手动完成的步骤
 
@@ -37,11 +37,15 @@ mailboxes_qq / mailboxes_zju，程序自动识别；config.json 中 password_fil
 所有账户 smtp_enabled=false。发信与事件启用属于后续单独动作。
 没有实际发信、邮箱登录、事件订阅、回调或平台签名密钥被创建。
 
-包内 MCP auth 使用 Plugin Creator 当前 OpenAI 扩展格式：
-extensions.com.openai.auth.type=oauth, client.mode=dcr,
-baseScopes/defaultScopes=[mail:read]。端点由已有 HTTPS 路由及服务源码确定；
-OAuth 发现依照服务器 /.well-known 元数据。此时实时发现仍受 owner 手动设置所阻。
-公开 Agent Plugins 基础 mcp schema 比 OpenAI 扩展配置更窄；不要把剥除扩展后的
-基础结构校验误报成平台实测。实际安装/发现结果必须由平台返回后确认。
+0.3.1 的 portable mcp.json 只声明 type 和 url，不含服务器级 extensions。
+公开 Agent Plugins 1.0.0 schema 及 Codex portable 解析器不接受该扩展字段；
+移除它是加载兼容性修正，不是关闭服务端 OAuth。客户端应根据未授权 MCP 的
+WWW-Authenticate 和 /.well-known 元数据发现 OAuth/DCR。
+服务端挑战请求 mail:read，授权请求未提供 scope 时服务端默认 mail:read。
+若客户端显示 mail:send 或 mail:events，先不要授予额外权限，记录非敏感错误信息。
+
+必须分别验证：包校验通过、宿主加载 MCP、出现授权入口、OAuth 成功、工具可用。
+安装成功不代表连接成功。已有私有插件应原位更新；不要重复创建或另建 MCP 插件。
+首次验证只列配置账户和配置状态，不读取邮件、不发测试信。
 
 提供的代码/测试不能替代实际 QQ/ZJU 登录、OAuth 平台连接和事件端到端验证。
