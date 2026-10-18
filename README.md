@@ -1,12 +1,10 @@
 # Mail Bridge
 
-IMAP/SMTP email connector for chatgpt.
+IMAP/SMTP MCP backend for ChatGPT, connected directly over Streamable HTTP with OAuth.
 
-| Directory | Purpose |
-|---|---|
-| `mail-bridge-rust/` | backend |
-| `mail-bridge-private/` | chatgpt plugin |
-
+The backend is in [`mail-bridge-rust/`](mail-bridge-rust/README.md). This repository
+does not distribute a separate ChatGPT plugin package. See the backend README
+for account setup, authorization, and deployment.
 
 ```bash
 cd mail-bridge-rust

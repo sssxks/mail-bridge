@@ -55,7 +55,9 @@ callbacks require an explicit literal loopback IP, e.g. `http://127.0.0.1/callba
 A portless loopback policy allows ephemeral ports on that IP and exact path.
 Registration and token exchange still require the exact registered redirect and
 PKCE S256. Default discovery advertises `mail:read`; sending and events require
-separate scopes and feature controls. Installing a plugin does not host the service.
+separate scopes and feature controls. Connect the deployed `/mcp` endpoint directly
+in ChatGPT using OAuth; no separate plugin ZIP is required. Adding the connection
+does not host or start the service.
 
 ## Mail behavior
 
