@@ -13,8 +13,9 @@ use mail_bridge_rust::{
     db::{Db, hash},
     http::router,
     mail::{
-        Backend, Draft, MailAccount, MailService, Page, RealBackend, parse_mail, search,
-        utf7_decode, utf7_encode,
+        Backend, Draft, MailAccount, MailService, RealBackend,
+        page::{Page, SearchCriteria},
+        parse_mail, search, utf7_decode, utf7_encode,
     },
 };
 use serde_json::{Value, json};
@@ -173,8 +174,7 @@ fn input_controls() {
         .validate()
         .is_err()
     );
-    let p: Page = serde_json::from_value(json!({"before_uid":10})).unwrap();
-    assert!(p.validate(false).is_err());
+    assert!(Page::parse(json!({"before_uid":10}), false).is_err());
     assert!(serde_json::from_value::<Config>(json!({"imap_security":"none"})).is_err());
     assert!(mail_bridge_rust::auth::form(b"scope=mail%3Aread&scope=mail%3Asend").is_err());
 }
@@ -337,10 +337,14 @@ async fn body_size_uidvalidity_and_utf8_search() {
     ])
     .await;
     assert!(
-        search(&mut session, "UID 1:30", "SUBJECT", "中文")
-            .await
-            .unwrap()
-            .contains(&10)
+        search(
+            &mut session,
+            "UID 1:30",
+            &SearchCriteria::parse("SUBJECT", "中文".into()).unwrap()
+        )
+        .await
+        .unwrap()
+        .contains(&10)
     );
     handle.await.unwrap();
 }

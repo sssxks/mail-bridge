@@ -128,52 +128,14 @@ pub fn parse_mail(raw: &[u8], with_body: bool) -> Result<Value> {
     Ok(output)
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Page {
-    #[serde(default = "inbox")]
-    pub folder: String,
-    #[serde(default = "default_limit")]
-    pub limit: usize,
-    pub before_uid: Option<u32>,
-    pub uidvalidity: Option<u32>,
-    pub field: Option<String>,
-    pub query: Option<String>,
-}
+pub mod page;
+use page::{Page, SearchCriteria};
+
 fn inbox() -> String {
     "INBOX".into()
 }
 fn default_limit() -> usize {
     10
-}
-impl Page {
-    pub fn validate(&self, search: bool) -> Result<()> {
-        clean(&self.folder, 512)?;
-        if !(1..=20).contains(&self.limit)
-            || self.before_uid == Some(0)
-            || self.uidvalidity == Some(0)
-            || (self.before_uid.is_some() && self.uidvalidity.is_none())
-        {
-            return Err(Error(
-                "Invalid page; provide limit 1–20 and preserve UIDVALIDITY with before_uid",
-            ));
-        }
-        if search {
-            if !matches!(
-                self.field.as_deref(),
-                Some("SUBJECT" | "FROM" | "TO" | "TEXT")
-            ) {
-                return Err(Error("Unsupported search field"));
-            }
-            clean(
-                self.query.as_deref().ok_or(Error("Search query missing"))?,
-                256,
-            )?;
-        } else if self.field.is_some() || self.query.is_some() {
-            return Err(Error("Use search_messages for search fields"));
-        }
-        Ok(())
-    }
 }
 
 pub trait Backend: Send + Sync {
@@ -324,19 +286,18 @@ impl RealBackend {
             }
             return result.ok_or(Error("UID not found"));
         }
-        let a: Page = serde_json::from_value(args).map_err(|_| Error("Invalid page arguments"))?;
-        a.validate(name == "search_messages")?;
+        let a = Page::parse(args, name == "search_messages")?;
         let selected = session
-            .examine(utf7_encode(&a.folder))
+            .examine(utf7_encode(a.folder()))
             .await
             .map_err(safe)?;
         let validity = selected
             .uid_validity
             .ok_or(Error("Server omitted UIDVALIDITY"))?;
-        if a.uidvalidity.is_some_and(|v| v != validity) {
+        if a.uidvalidity().is_some_and(|v| v != validity) {
             return Err(Error("UIDVALIDITY changed; list this folder again"));
         }
-        let mut upper = if let Some(next) = a.before_uid.or(selected.uid_next) {
+        let mut upper = if let Some(next) = a.before_uid().or(selected.uid_next) {
             next.saturating_sub(1)
         } else if selected.exists == 0 {
             0
@@ -364,14 +325,8 @@ impl RealBackend {
             }
             let lower = upper.saturating_sub(1023).max(1);
             let range = format!("UID {lower}:{upper}");
-            let found = if name == "search_messages" {
-                search(
-                    session,
-                    &range,
-                    a.field.as_deref().unwrap(),
-                    a.query.as_deref().unwrap(),
-                )
-                .await?
+            let found = if let Some(criteria) = a.search() {
+                search(session, &range, criteria).await?
             } else {
                 session.uid_search(&range).await.map_err(safe)?
             };
@@ -382,12 +337,12 @@ impl RealBackend {
             found.sort_unstable_by(|a, b| b.cmp(a));
             for uid in found {
                 uids.push(uid);
-                if uids.len() == a.limit {
+                if uids.len() == a.limit() {
                     next = if uid > 1 { Some(uid) } else { None };
                     break;
                 }
             }
-            if uids.len() == a.limit {
+            if uids.len() == a.limit() {
                 break;
             }
             upper = lower - 1;
@@ -423,10 +378,10 @@ pub async fn search<
 >(
     session: &mut Session<T>,
     range: &str,
-    field: &str,
-    query: &str,
+    criteria: &SearchCriteria,
 ) -> Result<HashSet<u32>> {
-    clean(query, 256)?;
+    let field = criteria.field();
+    let query = criteria.query();
     if query.is_ascii() {
         return session
             .uid_search(format!("{range} {field} {}", quote(query)?))
