@@ -74,6 +74,16 @@ MAIL_BRIDGE_EVENTS_ENABLED=false
 ```
 
 Use the exact OAuth callback displayed by the platform rather than guessing it.
+For the native desktop client's observed `/callback` flow, append
+`"http://127.0.0.1/callback"` to `MAIL_BRIDGE_OAUTH_REDIRECT_URIS`. This explicitly
+permits ephemeral ports on that literal loopback IP and exact path, as required
+by RFC 8252 section 7.3. It does not permit arbitrary HTTP hosts, `localhost`,
+queries, fragments, credentials, or path prefixes. Add the separate literal
+`"http://[::1]/callback"` only if an actual IPv6 client requires it. A configured
+loopback URI with an explicit port remains restricted to that port. HTTPS
+callbacks remain exact. Registration stores the client's full callback URI;
+authorization and token exchange still require that exact registered URI and
+PKCE S256. Changing callback policy requires a service restart.
 The public URL is an HTTPS origin, without a path. Protect the state directory
 with 0700: it contains OAuth state, send deduplication journal and, when enabled,
 event subscriptions, platform-provided signing secrets and minimal event outbox.

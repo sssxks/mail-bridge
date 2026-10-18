@@ -2,7 +2,7 @@
 //! Axum owns HTTP parsing, RustCrypto supplies HMAC and constant-time checks.
 use crate::{
     Error, Result,
-    config::Settings,
+    config::{Settings, validate_oauth_redirect},
     db::{Db, hash, now},
     safe,
 };
@@ -69,6 +69,26 @@ pub struct Auth {
     owner: Arc<Zeroizing<String>>,
 }
 impl Auth {
+    pub fn redirect_allowed(&self, redirect: &str) -> bool {
+        let Ok(candidate) = validate_oauth_redirect(redirect) else {
+            return false;
+        };
+        self.redirects.iter().any(|allowed| {
+            if allowed == redirect {
+                return true;
+            }
+            let Ok(template) = validate_oauth_redirect(allowed) else {
+                return false;
+            };
+            // Port flexibility is opt-in through a portless loopback allowlist
+            // entry. The registered full URI remains exact for this client.
+            template.scheme() == "http"
+                && template.port().is_none()
+                && candidate.scheme() == "http"
+                && template.host() == candidate.host()
+                && template.path() == candidate.path()
+        })
+    }
     pub fn new(settings: &Settings, db: Db) -> Self {
         Self {
             base: settings.public_url.clone(),
@@ -99,8 +119,7 @@ impl Auth {
                 .ok_or(Error("invalid_redirect_uri"))?,
         )
         .map_err(|_| Error("invalid_redirect_uri"))?;
-        if uris.is_empty() || uris.len() > 5 || uris.iter().any(|uri| !self.redirects.contains(uri))
-        {
+        if uris.is_empty() || uris.len() > 5 || uris.iter().any(|uri| !self.redirect_allowed(uri)) {
             return Err(Error("invalid_redirect_uri"));
         }
         if request
@@ -157,7 +176,7 @@ impl Auth {
         let redirects: Vec<String> =
             serde_json::from_str(&stored.ok_or(Error("invalid_client"))?).map_err(safe)?;
         if !redirects.contains(&checked["redirect_uri"])
-            || !self.redirects.contains(&checked["redirect_uri"])
+            || !self.redirect_allowed(&checked["redirect_uri"])
         {
             return Err(Error("invalid_redirect_uri"));
         }

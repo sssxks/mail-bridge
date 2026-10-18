@@ -398,9 +398,64 @@ fn hidden(page: &str) -> Params {
     result
 }
 
+#[test]
+fn oauth_redirect_policy_is_explicit_and_loopback_only() {
+    let (dir, mut settings, db, _fake, _service) = setup();
+    let native = "http://127.0.0.1:58597/callback";
+    let web = settings.redirects[0].clone();
+    assert!(!Auth::new(&settings, db.clone()).redirect_allowed(native));
+    settings.redirects.extend([
+        "http://127.0.0.1/callback".into(),
+        "http://[::1]/callback".into(),
+    ]);
+    let auth = Auth::new(&settings, db.clone());
+    for allowed in [
+        native,
+        "http://127.0.0.1:58598/callback",
+        "http://[::1]:58597/callback",
+        &web,
+    ] {
+        assert!(auth.redirect_allowed(allowed), "{allowed}");
+        assert!(auth.register(json!({"redirect_uris":[allowed]})).is_ok());
+    }
+    for rejected in [
+        "http://evil.example:58597/callback",
+        "http://localhost:58597/callback",
+        "http://127.0.0.2:58597/callback",
+        "http://0.0.0.0:58597/callback",
+        "http://127.0.0.1.evil.example:58597/callback",
+        "http://127.0.0.1:58597/callback/extra",
+        "http://127.0.0.1:58597/%63allback",
+        "http://127.0.0.1:58597/callback?next=https://evil.example",
+        "http://127.0.0.1:58597/callback#fragment",
+        "http://user@127.0.0.1:58597/callback",
+        "http://127.0.0.1:0/callback",
+        "http://2130706433:58597/callback",
+        "https://127.0.0.1:58597/callback",
+        "https://chatgpt.com/connector_platform_oauth_redirect/extra",
+    ] {
+        assert!(!auth.redirect_allowed(rejected), "{rejected}");
+        assert!(auth.register(json!({"redirect_uris":[rejected]})).is_err());
+    }
+    settings.redirects = vec![native.into()];
+    let fixed = Auth::new(&settings, db);
+    assert!(fixed.redirect_allowed(native));
+    assert!(!fixed.redirect_allowed("http://127.0.0.1:58598/callback"));
+    drop(dir);
+}
+
 #[tokio::test]
 async fn http_oauth_pkce_mcp_and_scope() {
-    let (_dir, settings, db, _fake, service) = setup();
+    oauth_pkce_mcp_and_scope_for_callback("https://chatgpt.com/connector_platform_oauth_redirect")
+        .await;
+    oauth_pkce_mcp_and_scope_for_callback("http://127.0.0.1:58597/callback").await;
+}
+
+async fn oauth_pkce_mcp_and_scope_for_callback(callback: &str) {
+    let (_dir, mut settings, db, _fake, service) = setup();
+    if callback.starts_with("http:") {
+        settings.redirects = vec!["http://127.0.0.1/callback".into()];
+    }
     let auth = Arc::new(Auth::new(&settings, db.clone()));
     let app = router(&settings, auth.clone(), service);
     let (status, headers, _) = request(
@@ -439,7 +494,7 @@ async fn http_oauth_pkce_mcp_and_scope() {
         app.clone(),
         "/oauth/register",
         "POST",
-        json!({"redirect_uris":settings.redirects}).to_string(),
+        json!({"redirect_uris":[callback],"token_endpoint_auth_method":"none"}).to_string(),
         None,
         None,
         None,
@@ -456,7 +511,7 @@ async fn http_oauth_pkce_mcp_and_scope() {
     );
     let params = Params::from([
         ("client_id".into(), client.clone()),
-        ("redirect_uri".into(), settings.redirects[0].clone()),
+        ("redirect_uri".into(), callback.into()),
         ("response_type".into(), "code".into()),
         ("code_challenge".into(), challenge.as_str().into()),
         ("code_challenge_method".into(), "S256".into()),
@@ -464,6 +519,12 @@ async fn http_oauth_pkce_mcp_and_scope() {
         ("state".into(), "mock-state".into()),
         ("scope".into(), "mail:read".into()),
     ]);
+    let mut wrong_callback = params.clone();
+    wrong_callback.insert(
+        "redirect_uri".into(),
+        "http://127.0.0.1:58598/callback".into(),
+    );
+    assert!(auth.consent_form(&wrong_callback).is_err());
     let path = format!(
         "/oauth/authorize?{}",
         serde_urlencoded::to_string(&params).unwrap()
@@ -501,7 +562,7 @@ async fn http_oauth_pkce_mcp_and_scope() {
     let mut exchange = Params::from([
         ("grant_type".into(), "authorization_code".into()),
         ("client_id".into(), client.clone()),
-        ("redirect_uri".into(), settings.redirects[0].clone()),
+        ("redirect_uri".into(), callback.into()),
         ("code".into(), returned["code"].clone()),
         ("code_verifier".into(), verifier),
         ("resource".into(), auth.resource.clone()),
@@ -510,6 +571,12 @@ async fn http_oauth_pkce_mcp_and_scope() {
     let mut invalid_pkce = exchange.clone();
     invalid_pkce.insert("code_verifier".into(), "b".repeat(64));
     assert!(auth.exchange(&invalid_pkce).is_err());
+    let mut invalid_callback = exchange.clone();
+    invalid_callback.insert(
+        "redirect_uri".into(),
+        "http://127.0.0.1:58598/callback".into(),
+    );
+    assert!(auth.exchange(&invalid_callback).is_err());
     assert!(
         auth.register(json!({"redirect_uris":["https://evil.example/callback"]}))
             .is_err()

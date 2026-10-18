@@ -166,6 +166,32 @@ pub struct Settings {
     pub data_dir: PathBuf,
     pub bind: std::net::SocketAddr,
 }
+
+/// HTTPS callbacks are exact. Native callbacks require an explicit loopback IP;
+/// a configured HTTP URI without a port permits an ephemeral client port.
+pub fn validate_oauth_redirect(redirect: &str) -> Result<url::Url> {
+    let u = url::Url::parse(redirect).map_err(safe)?;
+    let loopback = matches!(u.host(), Some(url::Host::Ipv4(ip)) if ip == std::net::Ipv4Addr::LOCALHOST)
+        || matches!(u.host(), Some(url::Host::Ipv6(ip)) if ip == std::net::Ipv6Addr::LOCALHOST);
+    if redirect.len() > 2048
+        || redirect.trim() != redirect
+        || u.host_str().is_none()
+        || u.fragment().is_some()
+        || !u.username().is_empty()
+        || u.password().is_some()
+        || (u.scheme() != "https"
+            && !(u.scheme() == "http"
+                && loopback
+                && u.query().is_none()
+                && u.port() != Some(0)
+                && u.as_str() == redirect))
+    {
+        return Err(Error(
+            "Use exact HTTPS callbacks or canonical HTTP loopback IP callbacks",
+        ));
+    }
+    Ok(u)
+}
 impl Settings {
     fn secret(name: &str) -> Result<String> {
         if let Some(path) = std::env::var_os(format!("{name}_FILE")) {
@@ -251,17 +277,7 @@ impl Settings {
             return Err(Error("Set exact OAuth redirect URI allowlist"));
         }
         for redirect in &redirects {
-            let u = url::Url::parse(redirect).map_err(safe)?;
-            if u.scheme() != "https"
-                || u.host_str().is_none()
-                || u.fragment().is_some()
-                || !u.username().is_empty()
-                || u.password().is_some()
-            {
-                return Err(Error(
-                    "Redirects must be exact HTTPS URLs without credentials or fragments",
-                ));
-            }
+            validate_oauth_redirect(redirect)?;
         }
         Ok(Self {
             accounts,
