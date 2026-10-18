@@ -1,7 +1,7 @@
 """Host-only read-only load check; tokens and mailbox contents never leave the host.
 
-Run with access to the live database: python3 check-mail-concurrency.py DB ORIGIN.
-Four simultaneous list_folders calls per round, spread across existing accounts.
+Run with access to the live database: python3 check-mail-concurrency.py DB ORIGIN [COUNT].
+Default four simultaneous list_folders calls per round, spread across accounts.
 No sends, message bodies, subscriptions or configuration changes. A temporary
 read token is always removed; output contains only timing/status/resource counts.
 """
@@ -18,7 +18,9 @@ import time
 import urllib.error
 import urllib.request
 
-database, origin = sys.argv[1:]
+database, origin = sys.argv[1:3]
+concurrency = int(sys.argv[3]) if len(sys.argv) == 4 else 4
+assert 1 <= concurrency <= 16, "Use between one and sixteen requests"
 db = sqlite3.connect(database)
 accounts = [row[0] for row in db.execute("SELECT id FROM runtime_accounts ORDER BY id")]
 assert accounts, "No configured accounts"
@@ -69,12 +71,12 @@ try:
     sampler.start()
     rounds = []
     for _ in range(2):
-        barrier = threading.Barrier(4)
+        barrier = threading.Barrier(concurrency)
         start = time.monotonic()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-            calls = list(pool.map(lambda i: call(i, barrier), range(4)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+            calls = list(pool.map(lambda i: call(i, barrier), range(concurrency)))
         rounds.append({"seconds": round(time.monotonic() - start, 3), "calls": calls})
-    print(json.dumps({"concurrency": 4, "account_count": len(accounts), "rounds": rounds, "peak": peak}))
+    print(json.dumps({"concurrency": concurrency, "account_count": len(accounts), "rounds": rounds, "peak": peak}))
 finally:
     stop.set()
     if sampler.ident is not None:
