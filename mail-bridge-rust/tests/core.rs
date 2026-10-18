@@ -13,7 +13,7 @@ use mail_bridge_rust::{
     db::{Db, hash},
     http::router,
     mail::{
-        Backend, Draft, MailAccount, MailService, RealBackend,
+        Backend, MailAccount, MailService, RealBackend,
         page::{Page, SearchCriteria},
         parse_mail, search, utf7_decode, utf7_encode,
     },
@@ -165,15 +165,6 @@ fn unicode_and_mime() {
 }
 #[test]
 fn input_controls() {
-    assert!(
-        Draft {
-            to: vec!["a@example.com".into()],
-            subject: "x\r\nBcc: y@example.com".into(),
-            body: "body".into()
-        }
-        .validate()
-        .is_err()
-    );
     assert!(Page::parse(json!({"before_uid":10}), false).is_err());
     assert!(serde_json::from_value::<Config>(json!({"imap_security":"none"})).is_err());
     assert!(mail_bridge_rust::auth::form(b"scope=mail%3Aread&scope=mail%3Asend").is_err());

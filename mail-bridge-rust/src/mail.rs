@@ -11,10 +11,12 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::{TryStreamExt, future::BoxFuture};
 use lettre::{
     Address, AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
-    message::{Mailbox, header::ContentType},
     transport::smtp::authentication::Credentials,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+
+mod draft;
+use draft::RawDraft;
 use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc, time::Duration};
 use tokio::{net::TcpStream, sync::Semaphore};
@@ -451,49 +453,6 @@ impl Backend for RealBackend {
         })
     }
 }
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Draft {
-    pub to: Vec<String>,
-    pub subject: String,
-    pub body: String,
-}
-impl Draft {
-    pub fn validate(&self) -> Result<()> {
-        if self.to.is_empty() || self.to.len() > 20 {
-            return Err(Error("Provide 1–20 explicit recipients"));
-        }
-        for addr in &self.to {
-            address(addr)?;
-        }
-        clean(&self.subject, 500)?;
-        if self.body.trim().is_empty()
-            || self.body.chars().count() > 20000
-            || self.body.contains('\0')
-        {
-            return Err(Error("Body must contain 1–20000 characters"));
-        }
-        Ok(())
-    }
-    pub fn preview(&self) -> Result<Value> {
-        self.validate()?;
-        Ok(
-            json!({"to":self.to,"subject":self.subject,"body":self.body,"status":"preview_only_not_saved_or_sent"}),
-        )
-    }
-    pub fn message(&self, from: &str, id: &str) -> Result<Message> {
-        self.validate()?;
-        let mut message = Message::builder()
-            .from(Mailbox::new(None, address(from)?))
-            .subject(&self.subject)
-            .message_id(Some(id.to_owned()))
-            .header(ContentType::TEXT_PLAIN);
-        for recipient in &self.to {
-            message = message.to(Mailbox::new(None, address(recipient)?));
-        }
-        message.body(self.body.clone()).map_err(safe)
-    }
-}
 #[derive(Clone)]
 pub struct MailAccount {
     pub id: String,
@@ -629,9 +588,9 @@ impl MailService {
     async fn inner(&self, name: &str, args: Value, account: &MailAccount) -> Result<Value> {
         match name {
             "prepare_draft" => {
-                let draft: Draft = serde_json::from_value(args)
+                let draft: RawDraft = serde_json::from_value(args)
                     .map_err(|_| Error("Provide recipients, subject and body"))?;
-                let mut preview=draft.preview()?;
+                let mut preview=draft.parse()?.preview();
                 preview["from_address"]=json!(account.config.from_address);
                 Ok(preview)
             }
@@ -639,9 +598,9 @@ impl MailService {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
                 struct Send {
-                    to: Vec<String>,
-                    subject: String,
-                    body: String,
+                    to: Box<[Box<str>]>,
+                    subject: Box<str>,
+                    body: Box<str>,
                     request_id: String,
                     confirm_send: bool,
                 }
@@ -650,12 +609,11 @@ impl MailService {
                         "Explicit recipients, subject, body, request_id and confirmation required",
                     )
                 })?;
-                let draft = Draft {
+                let draft = RawDraft {
                     to: send.to,
                     subject: send.subject,
                     body: send.body,
-                };
-                draft.validate()?;
+                }.parse()?;
                 if !send.confirm_send || !account.config.smtp_enabled {
                     return Err(Error(
                         "Explicit send confirmation and locally enabled SMTP are required",
