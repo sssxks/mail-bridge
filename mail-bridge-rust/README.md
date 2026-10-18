@@ -1,70 +1,41 @@
-# Mail Bridge Rust 0.3
+# Mail Bridge Rust 0.4
 
-A single-owner, multi-account IMAP/SMTP connector using authenticated HTTP MCP.
-QQ and ZJU examples are included. Source, Cargo.lock, mock tests, Debian 12 amd64
-binary and deployment templates are delivered. Version 0.3.3 is deployed;
-see [current live status](../docs/STATUS.md) for mailbox, SMTP and rollback checks.
+A single-owner, multi-account IMAP/SMTP service using authenticated HTTP MCP.
+Mailbox accounts are runtime data in one SQLite store. There is no account JSON
+startup configuration, password-directory fallback, or account credential mount.
 
-## What works
+## Add an account from chat
 
-`list_accounts` and `configuration_status` inspect configuration without connecting.
-`list_folders`, `list_messages`, `search_messages` and `read_message` require an
-explicit `account_id`. Every read uses IMAP EXAMINE and BODY.PEEK. UIDs are scoped
-to the account, mailbox and UIDVALIDITY; a stale UIDVALIDITY is rejected. MIME,
-Chinese encodings and modified UTF-7 mailbox names are handled by bounded parsers.
-HTML is converted to text without loading remote resources. Search input is
-escaped, pagination is bounded, and errors suppress private server details.
+1. Ask to add a mailbox. `begin_account_setup` returns a private link and setup ID.
+2. Open the link within ten minutes. Enter the account ID, display name, address,
+   IMAP hostname/port, TLS or STARTTLS, mailbox client password, and independent
+   service owner password in the private page. A separate login username and SMTP
+   server settings are optional. SMTP remains disabled for every newly added account.
+3. Saving commits the account to SQLite and publishes it to the shared registry.
+   The current process can immediately use it; no restart is needed.
+4. `account_setup_status` reports pending/saved for that OAuth connection.
+   `list_accounts` and `configuration_status` inspect accounts without connecting.
+   Saving or reporting `ready` does not prove login. Reading requires a separate
+   user request and explicit account ID.
 
-`prepare_draft` produces a preview with the selected account/from address; it does
-not write to IMAP Drafts. `send_email` is a write tool requiring account_id,
-explicit recipients, nonempty subject/body, request_id and confirm_send=true.
-The fixed sender comes from that account. SMTP is disabled in the template.
-Only send what the user explicitly approved. Durable (account_id, request_id)
-deduplication fails closed after ambiguous failures; never automatically retry
-with a new ID. SMTP acceptance does not guarantee delivery or append a Sent copy.
-Mailbox content is untrusted data, never instructions.
+Only the owner-confirmed private form receives passwords. Neither MCP tool accepts
+credentials. Links require an active originating OAuth grant, owner confirmation,
+CSRF token, secure HttpOnly cookie and same-origin POST. They expire after ten
+minutes, are single use after saving, and are capped at eight invitations. New
+accounts cannot overwrite existing IDs. The combined account limit is eight.
 
-## Credentials and account configuration
+## Persistent state and authorization
 
-Copy config.example.json into a private directory outside this source tree.
-Use 1-8 accounts with unique stable IDs and password-file basenames (1-32 lowercase
-ASCII letters, digits, underscores or hyphens). Use the full mailbox address for
-username/from_address. Missing or invalid credentials disable only that account;
-`ready` means a file was loaded, not that a mailbox login succeeded.
+`MAIL_BRIDGE_DATA_DIR/mail-bridge.sqlite3` is the sole account source. It contains
+mailbox credentials, OAuth state, send deduplication and optional event state.
+SQLite is not encrypted. Protect its directory with 0700, files with 0600, and
+all backups as secrets. Unix creation uses private permissions before opening
+SQLite. The supplied systemd unit provides a private writable StateDirectory.
+Never paste, attach, log or commit the database or mailbox credentials.
 
-| Provider | IMAP implicit TLS | SMTP implicit TLS |
-|---|---|---|
-| QQ | imap.qq.com:993 | smtp.qq.com:465 |
-| ZJU | imap.zju.edu.cn:993 | smtp.zju.edu.cn:994 |
-
-QQ needs the mail service's client authorization code. ZJU with two-factor
-authentication needs its client-specific password. Enter secrets yourself over
-a trusted terminal; never paste them into chat, config JSON, source, command-line
-arguments, shell history, screenshots, plugin files or logs. No credentials have
-been created or populated for you. Keep SMTP disabled until you choose to use it.
-
-Example of manual secret entry inside your own trusted shell, after creating a
-private external mailboxes directory (0700), with tracing disabled:
-
-```bash
-umask 077
-IFS= read -r -s -p 'QQ client authorization code: ' mailbox_secret
-printf '\n'
-printf '%s' "$mailbox_secret" > /private/path/mailboxes/qq
-unset mailbox_secret
-```
-
-Use the same procedure for mailboxes/zju and a separate owner_password file.
-The owner password must be 32-256 ASCII characters, generated and entered by you,
-and differ from every mailbox credential. It protects the OAuth consent screen;
-it is never the QQ/ZJU credential. Do not run the example with a literal secret.
-Protect files with 0600 and their parent directory with 0700.
-
-Required nonsecret environment settings:
+Startup settings describe the service, not its mailboxes:
 
 ```text
-MAIL_BRIDGE_CONFIG=/private/path/config.json
-MAIL_BRIDGE_PASSWORDS_DIR=/private/path/mailboxes
 MAIL_BRIDGE_OWNER_PASSWORD_FILE=/private/path/owner_password
 MAIL_BRIDGE_PUBLIC_URL=https://your-mail.example.com
 MAIL_BRIDGE_OAUTH_REDIRECT_URIS=["https://chatgpt.com/connector_platform_oauth_redirect"]
@@ -73,116 +44,87 @@ MAIL_BRIDGE_BIND=127.0.0.1:18765
 MAIL_BRIDGE_EVENTS_ENABLED=false
 ```
 
-Use the exact OAuth callback displayed by the platform rather than guessing it.
-For the native desktop client's observed `/callback` flow, append
-`"http://127.0.0.1/callback"` to `MAIL_BRIDGE_OAUTH_REDIRECT_URIS`. This explicitly
-permits ephemeral ports on that literal loopback IP and exact path, as required
-by RFC 8252 section 7.3. It does not permit arbitrary HTTP hosts, `localhost`,
-queries, fragments, credentials, or path prefixes. Add the separate literal
-`"http://[::1]/callback"` only if an actual IPv6 client requires it. A configured
-loopback URI with an explicit port remains restricted to that port. HTTPS
-callbacks remain exact. Registration stores the client's full callback URI;
-authorization and token exchange still require that exact registered URI and
-PKCE S256. Changing callback policy requires a service restart.
-The public URL is an HTTPS origin, without a path. Protect the state directory
-with 0700: it contains OAuth state, send deduplication journal and, when enabled,
-event subscriptions, platform-provided signing secrets and minimal event outbox.
-SQLite is not encrypted. Unix database permissions are set to 0600; the supplied
-systemd unit uses a private state directory and UMask=0077. Never share this DB.
+The owner enters a separate 32-256 character ASCII owner password privately. It
+protects authorization and account changes and must differ from mailbox passwords.
+QQ uses a client authorization code; ZJU with two-factor authentication uses a
+client-specific password. This release accepts password-based IMAP authentication;
+provider-specific mailbox OAuth is not implemented.
 
-## Run and deploy
+Use the platform's actual callback. HTTPS callbacks are exact; native desktop
+callbacks require an explicit literal loopback IP, e.g. `http://127.0.0.1/callback`.
+A portless loopback policy allows ephemeral ports on that IP and exact path.
+Registration and token exchange still require the exact registered redirect and
+PKCE S256. Default discovery advertises `mail:read`; sending and events require
+separate scopes and feature controls. Installing a plugin does not host the service.
 
-For a local build: `cargo test --locked`, then `cargo run --locked --release`.
-The repository's browser regression uses a separate browser profile, synthetic
-owner credentials and local-only services:
+## Mail behavior
+
+`list_folders`, `list_messages`, `search_messages` and `read_message` require an
+explicit account ID. IMAP uses EXAMINE and BODY.PEEK. UIDs are scoped to account,
+mailbox and UIDVALIDITY. MIME, Chinese encodings and modified UTF-7 are supported.
+Bodies, searches, pagination, request sizes and timeouts are bounded. HTML is
+converted to text without loading remote content. Email content is untrusted data.
+
+`prepare_draft` previews the selected sender and exact content without writing
+IMAP Drafts. `send_email` requires `mail:send`, an enabled account, explicit
+recipients/subject/body, `confirm_send=true` and one preserved request ID.
+The durable `(account_id, request_id)` journal commits before an SMTP attempt.
+Never automatically retry an ambiguous result. SMTP acceptance does not prove
+final delivery or create a Sent-folder copy. No test email is required for setup.
+
+The registry takes a short lock to clone an account, then releases it before
+network I/O. Saving commits before activation; failed writes activate nothing.
+Existing calls keep their snapshot. Account IDs are stable and cannot be replaced
+by the add flow. On process restart all accounts are restored from the same store.
+Existing migrated SMTP flags are preserved; new accounts start disabled.
+
+## Build, test and deploy
+
+```bash
+cargo test --locked
+cargo build --locked --release
+```
+
+Browser and migration regression from the repository root:
 
 ```powershell
 cargo build --locked --manifest-path mail-bridge-rust/Cargo.toml
 uv run scripts/test-oauth-browser.py --browser "C:/Program Files/BraveSoftware/Brave-Browser/Application/brave.exe"
+uv run --no-project python -X utf8 scripts/test-account-migration.py
 ```
 
-It exercises the actual HTML form, Secure cookie, Origin/Referer behavior, CSP
-redirect, PKCE callback and token exchange. The consent document uses
-`Referrer-Policy: strict-origin` so browser POSTs retain their real Origin without
-leaking authorization queries. Its form CSP permits self and the validated
-registered callback origin. Other responses retain `no-referrer`. Discovery
-advertises `mail:read` only so clients requesting all advertised scopes do not
-automatically ask for sending/events. Those optional scopes still require an
-explicit request and owner consent, as well as the existing feature controls.
+The browser test uses an isolated profile, synthetic credentials and local-only
+services. It verifies actual browser OAuth, private-form POST, immediate account
+visibility, restart persistence and preservation of the original OAuth connection.
+It never connects to a real mailbox or sends email.
 
-For Debian 12 amd64, extract the provided binary and verify SHA256SUMS. It requires
-glibc >=2.34, libgcc_s, libm and the ELF loader; Rust/Python/OpenSSL are not runtime
-dependencies. Build on a larger computer, not a 512 MiB mail bridge server:
+Build Linux amd64 on a larger builder, not a small deployment server:
 
 ```bash
 docker buildx build --platform linux/amd64 --target binary --output type=local,dest=dist .
 ```
 
-The HTTP listener is not a cloud hosting service. Local loopback can be used by a
-local HTTP MCP client. ChatGPT Work/Cloud, mobile and dots require a reachable
-HTTPS endpoint with the process running on your own host. Plugin packaging does
-not host it. No stdio or desktop hook is claimed to provide cloud delivery.
+The Debian 12 binary requires glibc >=2.34 and libgcc_s; Rust, Python and OpenSSL
+are not runtime dependencies. See [deployment and one-time migration](deploy/SETUP.md).
+Reverse-proxy `/mcp`, `/accounts/setup`, the OAuth endpoints and discovery metadata
+to the loopback listener. Preserve Host, Authorization, Cookie and Origin; disable
+body/query/auth logging, caching, buffering to disk and automatic upstream retries.
+The HTTPS page needs no external assets or JavaScript.
 
-The manual private-configuration helper lives in [deploy/setup-mail-bridge.sh](deploy/setup-mail-bridge.sh).
-See [server setup instructions](deploy/SETUP.md) for prerequisites, installation
-and owner-only credential entry. It does not install or start the service.
+## Events, upgrades and revocation
 
-Deployment templates in deploy/ are for review, not an installation script:
-place the binary under /opt/mail-bridge-rust, private configuration under
-/etc/mail-bridge-rust, and review the systemd unit/environment file. On systemd252,
-LoadCredential=mailboxes:/etc/mail-bridge-rust/mailboxes imports directory files as
-mailboxes_qq, mailboxes_zju; the program recognizes this prefix automatically.
-With an explicit MAIL_BRIDGE_PASSWORDS_DIR, ordinary qq/zju basenames are used.
-An empty mailboxes directory is allowed; owner_password is still mandatory.
-The optional Compose example mounts read-only external credentials and needs
-files readable by container UID10001. Do not change global permissions to solve it.
+Events default off. New account setup never creates a subscription or starts an
+IMAP watcher. If events are enabled and explicitly subscribed, the event source
+and catalog resolve accounts from the same runtime store without a restart.
+See [event contract](EVENTS.md) for platform signing and delivery requirements.
 
-Reverse proxy exactly /mcp, /oauth/authorize, /oauth/token, /oauth/register,
-/.well-known/oauth-protected-resource, /.well-known/oauth-protected-resource/mcp
-and /.well-known/oauth-authorization-server to loopback:18765. Preserve Host,
-Authorization, Cookie and Origin; use HTTPS, no body/auth logging, caching,
-automatic upstream retry or URL rewrite. Existing TLS termination can remain.
-Do not expose the unencrypted listener publicly. No additional inbound event
-path is needed; webhook delivery is outbound HTTPS.
+Back up private state before upgrades. Preserve the database and account IDs to
+retain OAuth grants, subscriptions and send deduplication. Account updates no
+longer need service restarts; upgrading the executable or changing service-wide
+settings still does. Stop the service before `--revoke-oauth`; this removes grants,
+clients, subscriptions and outbox, preserving mailbox accounts and the send journal.
 
-After deployment and manual credential setup, a private plugin can reference
-the HTTPS /mcp endpoint and discover tools. This ZIP is a server/source release,
-not an invented installable plugin manifest. Private plugin creation and platform
-authorization remain separate user-approved operations.
-
-## Optional new-mail events
-
-Events are OFF unless MAIL_BRIDGE_EVENTS_ENABLED=true (or 1). Enabling the feature
-alone does not open any mailbox or create any subscription. Only a successful,
-explicit platform subscription starts observation. See EVENTS.md for the exact
-contract, limits, retention and required platform verification. Existing mail
-tools and OAuth URLs are unchanged. No actual event subscription, platform key,
-real callback, mailbox operation or test email was created during development.
-
-## Upgrades, revocation and limits
-
-Stop the service and back up its private state before a user-approved upgrade.
-Preserve mail-bridge.sqlite3 and account IDs to keep OAuth and send deduplication.
-The old flat single-account config is supported as account_id=default; old send
-journal rows are imported into default only. Renaming account IDs may change the
-deduplication namespace, so do not retry old sends under a renamed account.
-Migrate old mailbox_password to explicit per-account files yourself. Re-scan the
-private plugin after tools/events change. The existing deployed 0.1 executable
-and configuration have not been replaced by this 0.3 delivery.
-
-For full revocation, stop the running service first, then run the configured
-binary with --revoke-oauth. This removes grants, clients, event subscriptions,
-signing keys and outbox while preserving the SMTP journal. Restart only when
-you choose. Removing one subscription cancels its workers and queued deliveries;
-an HTTP request already accepted by a receiver cannot be recalled. Deleting a
-mailbox password requires restarting the service to discard its in-memory copy.
-
-Limits: 8 inbound connections, 4 HTTP requests, 1 ordinary mail operation,
-2 event subscriptions, 128 queued events per subscription; 64 KiB request,
-16 KiB OAuth form, 2 MiB message/literal and 4 MiB IMAP connection input budget.
-Mail operations time out, attachment data is not returned. The systemd/Compose
-memory cap is 160 MiB; local idle measurements are not a full-load guarantee.
-
-Provider references: https://itc.zju.edu.cn/90691/list.htm ;
-https://imap.zju.edu.cn/coremail/help/clientoption.jsp?locale=zh_CN ;
-https://mail.zju.edu.cn/coremail/help/2fa_zh_CN.html .
+Limits: eight TCP connections, four HTTP requests, one ordinary mail operation,
+eight accounts, two event subscriptions, 128 queued events per subscription;
+64 KiB MCP request, 16 KiB private/OAuth form, 2 MiB mail/literal and 4 MiB IMAP input.
+The supplied service memory cap is 160 MiB.

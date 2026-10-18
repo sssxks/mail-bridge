@@ -2,7 +2,7 @@
 # requires-python = ">=3.11"
 # dependencies = ["playwright==1.64.0"]
 # ///
-"""Browser OAuth regression using only synthetic credentials and local services.
+"""Browser OAuth and live account setup regression with synthetic credentials.
 
 Run after cargo build: uv run scripts/test-oauth-browser.py --browser PATH
 No real provider, mailbox, or user browser profile is accessed.
@@ -26,11 +26,9 @@ os.environ['TMP']=str(temporary)
 os.environ['TEMP']=str(temporary)
 base='https://mail.example.test'
 owner='browser-test-owner-password-00000000'
-config=json.loads((root/'mail-bridge-rust/config.example.json').read_text())
-(work/'config.json').write_text(json.dumps(config))
 sock=socket.socket(); sock.bind(('127.0.0.1',0)); port=sock.getsockname()[1]; sock.close()
 env={k:v for k,v in os.environ.items() if not k.startswith('MAIL_BRIDGE_') and k!='CREDENTIALS_DIRECTORY'}
-env.update(MAIL_BRIDGE_CONFIG=str(work/'config.json'),MAIL_BRIDGE_PASSWORDS_DIR=str(work/'missing-mailboxes'),MAIL_BRIDGE_OWNER_PASSWORD=owner,MAIL_BRIDGE_PUBLIC_URL=base,MAIL_BRIDGE_OAUTH_REDIRECT_URIS=json.dumps(['http://127.0.0.1/callback']),MAIL_BRIDGE_DATA_DIR=str(work),MAIL_BRIDGE_BIND=f'127.0.0.1:{port}',MAIL_BRIDGE_EVENTS_ENABLED='false')
+env.update(MAIL_BRIDGE_OWNER_PASSWORD=owner,MAIL_BRIDGE_PUBLIC_URL=base,MAIL_BRIDGE_OAUTH_REDIRECT_URIS=json.dumps(['http://127.0.0.1/callback']),MAIL_BRIDGE_DATA_DIR=str(work),MAIL_BRIDGE_BIND=f'127.0.0.1:{port}',MAIL_BRIDGE_EVENTS_ENABLED='false')
 process=subprocess.Popen([str(args.server_binary.resolve())],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 def request(path,body=None):
     data=None if body is None else json.dumps(body).encode()
@@ -93,6 +91,38 @@ try:
             tokens=json.loads(urllib.request.urlopen(req,timeout=5).read())
             assert tokens.get('access_token') and tokens.get('scope')=='mail:read'
             observed.update(synthetic_token_exchange=True,scope=tokens['scope'],real_credentials_used=False)
+            def tool(name, arguments):
+                data=json.dumps({'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':name,'arguments':arguments}}).encode()
+                req=urllib.request.Request(f'http://127.0.0.1:{port}/mcp',data=data,headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream','Authorization':'Bearer '+tokens['access_token'],'MCP-Protocol-Version':'2025-06-18','Host':'mail.example.test'})
+                result=json.loads(urllib.request.urlopen(req,timeout=5).read())['result']
+                assert not result.get('isError'), 'MCP tool must succeed'
+                return json.loads(result['content'][0]['text'])
+            assert tool('list_accounts',{})['account_count']==0
+            invitation=tool('begin_account_setup',{})
+            page.goto(invitation['setup_url'])
+            assert page.locator('[name="password"]').get_attribute('type')=='password'
+            for name,value in {'account_id':'browser-test','name':'浏览器测试','email':'test@example.com','imap_host':'imap.example.com','imap_port':'993','password':'synthetic-browser-mailbox-password','owner_password':owner}.items():
+                page.locator('[name="'+name+'"]').fill(value)
+            page.locator('button[type="submit"]').click()
+            page.wait_for_load_state()
+            assert '邮箱已添加' in page.locator('h1').inner_text()
+            assert observed['post_origin']==base
+            assert observed['post_referer']==base+'/'
+            assert observed['post_status']==200
+            status=tool('account_setup_status',{'setup_id':invitation['setup_id']})
+            assert status['status']=='saved' and status['restart_required'] is False
+            accounts=tool('list_accounts',{})
+            assert accounts['account_count']==1 and accounts['accounts'][0]['account_id']=='browser-test'
+            assert accounts['accounts'][0]['smtp_enabled'] is False and accounts['accounts'][0]['connection_tested'] is False
+            assert 'synthetic-browser-mailbox-password' not in json.dumps(accounts)
+            # Reopen the real process with the same DB; no account configuration env/files exist.
+            process.terminate(); process.wait(timeout=5)
+            process=subprocess.Popen([str(args.server_binary.resolve())],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            for _ in range(50):
+                try: request('/.well-known/oauth-protected-resource'); break
+                except OSError: time.sleep(.1)
+            assert tool('list_accounts',{})==accounts
+            observed.update(private_browser_setup=True,hot_account_activation=True,accounts_survive_restart=True,existing_oauth_survives_restart=True,mailbox_login_attempted=False,email_sent=False)
             print(json.dumps(observed),flush=True)
             context.close()
         browser.close()
