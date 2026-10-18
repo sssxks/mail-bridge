@@ -460,7 +460,26 @@ pub struct MailAccount {
     pub config: Config,
     pub backend: Option<Arc<dyn Backend>>,
     pub credential_status: &'static str,
+    pub concurrency: AccountConcurrency,
 }
+/// Independent IMAP and SMTP budgets for one account. Clones share the budgets.
+/// At most two reads and one send may hold account permits; the service also
+/// bounds total active operations. Waiting for an account never holds a global permit.
+#[derive(Clone)]
+pub struct AccountConcurrency {
+    imap: Arc<Semaphore>,
+    smtp: Arc<Semaphore>,
+}
+impl Default for AccountConcurrency {
+    fn default() -> Self {
+        Self {
+            imap: Arc::new(Semaphore::new(2)),
+            smtp: Arc::new(Semaphore::new(1)),
+        }
+    }
+}
+/// Total ordinary mail operations, excluding local previews and event watchers.
+pub const MAIL_CONCURRENCY: usize = 4;
 impl MailAccount {
     fn status(&self) -> Value {
         json!({"account_id":self.id,"name":self.name,"from_address":self.config.from_address,"smtp_enabled":self.config.smtp_enabled,"credential_status":self.credential_status,"connection_tested":false})
@@ -490,6 +509,7 @@ impl MailService {
                         config: account.config,
                         backend: Some(backend),
                         credential_status: "ready",
+                        concurrency: AccountConcurrency::default(),
                     },
                 )
             })
@@ -497,7 +517,7 @@ impl MailService {
         Self {
             accounts: Arc::new(std::sync::RwLock::new(accounts)),
             db,
-            gate: Arc::new(Semaphore::new(1)),
+            gate: Arc::new(Semaphore::new(MAIL_CONCURRENCY)),
         }
     }
     pub fn from_store(db: Db) -> Result<Self> {
@@ -532,6 +552,7 @@ impl MailService {
                 config: account.config,
                 backend: Some(backend),
                 credential_status: "ready",
+                concurrency: AccountConcurrency::default(),
             },
         );
         Ok(())
@@ -545,7 +566,7 @@ impl MailService {
             let accounts = self.accounts.read().map_err(safe)?;
             let statuses: Vec<_> = accounts.values().map(MailAccount::status).collect();
             return Ok(
-                json!({"accounts":statuses,"account_count":accounts.len(),"max_mail_bytes":MAX_MAIL,"mail_concurrency":1,"transport":"streamable_http"}),
+                json!({"accounts":statuses,"account_count":accounts.len(),"max_mail_bytes":MAX_MAIL,"mail_concurrency":MAIL_CONCURRENCY,"imap_concurrency_per_account":2,"smtp_concurrency_per_account":1,"transport":"streamable_http"}),
             );
         }
         let account_id = args
@@ -563,10 +584,36 @@ impl MailService {
             .get(&account_id)
             .cloned()
             .ok_or(Error("Unknown account_id; use list_accounts"))?;
-        let _permit = self.gate.clone().try_acquire_owned().map_err(|_| {
-            Error("Mail operation busy; try later. Do not retry an uncertain send.")
-        })?;
-        let mut result=tokio::time::timeout(Duration::from_secs(45),self.inner(name,args,&account)).await.map_err(|_|Error("Mail operation timed out. A send may already have been accepted; never automatically retry."))??;
+        let mut result = if name == "prepare_draft" {
+            self.inner(name, args, &account).await?
+        } else {
+            let account_gate = match name {
+                "send_email" => &account.concurrency.smtp,
+                "list_folders" | "list_messages" | "search_messages" | "read_message" => {
+                    &account.concurrency.imap
+                }
+                _ => return Err(Error("Unknown tool")),
+            };
+            // One shared queue deadline: never spend five seconds on each gate.
+            // The permits live in this request future, including cancellation.
+            let (_account_permit, _global_permit) = tokio::time::timeout(
+                Duration::from_secs(5),
+                async {
+                    let account_permit = account_gate.acquire().await.map_err(safe)?;
+                    let global_permit = self.gate.acquire().await.map_err(safe)?;
+                    Ok::<_, Error>((account_permit, global_permit))
+                },
+            )
+            .await
+            .map_err(|_| Error("Mail queue wait timed out; this call did not start. Retry later, keeping the same request_id for a send."))??;
+            tokio::time::timeout(Duration::from_secs(45), self.inner(name, args, &account))
+                .await
+                .map_err(|_| if name == "send_email" {
+                    Error("Mail send timed out; delivery is uncertain. Keep the same request_id; never retry with a new ID.")
+                } else {
+                    Error("Mail read timed out; retry later.")
+                })??
+        };
         result
             .as_object_mut()
             .ok_or(Error("Invalid mail response"))?

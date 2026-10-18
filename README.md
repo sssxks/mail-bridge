@@ -126,7 +126,18 @@ longer need service restarts; upgrading the executable or changing service-wide
 settings still does. Stop the service before `--revoke-oauth`; this removes grants,
 clients, subscriptions and outbox, preserving mailbox accounts and the send journal.
 
-Limits: eight TCP connections, four HTTP requests, one ordinary mail operation,
+Limits: 24 TCP connections, 16 HTTP requests, four ordinary mail operations,
 eight accounts, two event subscriptions, 128 queued events per subscription;
 64 KiB MCP request, 16 KiB private/OAuth form, 2 MiB mail/literal and 4 MiB IMAP input.
 The supplied service memory cap is 160 MiB.
+
+Ordinary mail operations share a global budget of four, with separate per-account
+budgets of two IMAP reads and one SMTP send. Independent accounts can progress in
+parallel. Account permits are acquired before global permits so a saturated account
+does not reserve global slots while waiting. Queue wait is at most five seconds
+across both budgets, followed by at most 45 seconds of execution (HTTP: 55 seconds).
+Queue expiry means this invocation never started; send retries retain their original
+request ID. An execution timeout during sending is still an uncertain outcome.
+Account listing and draft preview do not consume network-operation permits.
+HTTP admission remains bounded and returns 429 beyond 16 in-flight handlers;
+these limits do not include the separately bounded event watchers.

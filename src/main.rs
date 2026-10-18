@@ -87,7 +87,7 @@ fn run() -> mail_bridge_rust::Result<()> {
                 .map_err(mail_bridge_rust::safe)?;
             let listener = LimitedListener {
                 inner: listener,
-                gate: Arc::new(tokio::sync::Semaphore::new(8)),
+                gate: Arc::new(tokio::sync::Semaphore::new(24)),
             };
             println!("Mail Bridge Rust: HTTP MCP ready on loopback/configured interface; no mailbox connection until requested.");
             let shutdown = CancellationToken::new();

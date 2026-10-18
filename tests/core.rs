@@ -85,6 +85,7 @@ fn setup() -> (tempfile::TempDir, Settings, Db, Arc<Fake>, Arc<MailService>) {
         config: mock_config(),
         backend: Some(fake.clone()),
         credential_status: "ready",
+        concurrency: Default::default(),
     };
     let service = Arc::new(MailService {
         accounts: Arc::new(std::sync::RwLock::new([("qq".into(), account)].into())),
@@ -92,6 +93,178 @@ fn setup() -> (tempfile::TempDir, Settings, Db, Arc<Fake>, Arc<MailService>) {
         gate: Arc::new(tokio::sync::Semaphore::new(1)),
     });
     (dir, settings, db, fake, service)
+}
+
+/// Controllable network latency: each backend operation reports entry and waits
+/// for a release, so concurrency assertions do not depend on wall-clock timing.
+struct SlowBackend {
+    started: tokio::sync::mpsc::UnboundedSender<&'static str>,
+    release: tokio::sync::Semaphore,
+}
+impl Backend for SlowBackend {
+    fn read<'a>(&'a self, _: &'a str, _: Value) -> BoxFuture<'a, Result<Value>> {
+        Box::pin(async move {
+            self.started.send("read").unwrap();
+            self.release.acquire().await.unwrap().forget();
+            Ok(json!({"messages": []}))
+        })
+    }
+    fn send(&self, _: Message) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            self.started.send("send").unwrap();
+            self.release.acquire().await.unwrap().forget();
+            Ok(())
+        })
+    }
+}
+fn slow_backend() -> (
+    Arc<SlowBackend>,
+    tokio::sync::mpsc::UnboundedReceiver<&'static str>,
+) {
+    let (started, receiver) = tokio::sync::mpsc::unbounded_channel();
+    (
+        Arc::new(SlowBackend {
+            started,
+            release: tokio::sync::Semaphore::new(0),
+        }),
+        receiver,
+    )
+}
+fn start_read(
+    service: &Arc<MailService>,
+    account: &'static str,
+) -> tokio::task::JoinHandle<Result<Value>> {
+    let service = service.clone();
+    tokio::spawn(async move {
+        service
+            .dispatch("list_messages", json!({"account_id": account}))
+            .await
+    })
+}
+
+#[tokio::test(start_paused = true)]
+async fn concurrent_reads_are_bounded_and_other_accounts_make_progress() {
+    let (_dir, _, _, _, original) = setup();
+    let mut service = (*original).clone();
+    service.gate = Arc::new(tokio::sync::Semaphore::new(
+        mail_bridge_rust::mail::MAIL_CONCURRENCY,
+    ));
+    let (backend, mut started) = slow_backend();
+    {
+        let mut accounts = service.accounts.write().unwrap();
+        accounts.get_mut("qq").unwrap().backend = Some(backend.clone());
+        for id in ["zju", "third"] {
+            let mut account = accounts["qq"].clone();
+            account.id = id.into();
+            account.concurrency = Default::default();
+            accounts.insert(id.into(), account);
+        }
+    }
+    let service = Arc::new(service);
+    let first = start_read(&service, "qq");
+    let second = start_read(&service, "qq");
+    assert_eq!(started.recv().await, Some("read"));
+    assert_eq!(started.recv().await, Some("read"));
+    let waiting = start_read(&service, "qq");
+    tokio::task::yield_now().await;
+    assert!(started.try_recv().is_err());
+    let other1 = start_read(&service, "zju");
+    let other2 = start_read(&service, "zju");
+    assert_eq!(started.recv().await, Some("read"));
+    assert_eq!(started.recv().await, Some("read"));
+    let global_waiting = start_read(&service, "third");
+    tokio::task::yield_now().await;
+    assert!(started.try_recv().is_err());
+    // Local work remains available even when every network slot is occupied.
+    service
+        .dispatch(
+            "prepare_draft",
+            json!({"account_id":"qq","to":["a@example.com"],"subject":"s","body":"b"}),
+        )
+        .await
+        .unwrap();
+    service.dispatch("list_accounts", json!({})).await.unwrap();
+    backend.release.add_permits(6);
+    for task in [first, second, waiting, other1, other2, global_waiting] {
+        task.await.unwrap().unwrap();
+    }
+    assert_eq!(started.recv().await, Some("read"));
+    assert_eq!(started.recv().await, Some("read"));
+    assert_eq!(service.gate.available_permits(), 4);
+}
+
+#[tokio::test(start_paused = true)]
+async fn queue_timeout_and_cancellation_never_start_backend_or_leak_permits() {
+    let (_dir, _, _, _, service) = setup();
+    let (backend, mut started) = slow_backend();
+    service
+        .accounts
+        .write()
+        .unwrap()
+        .get_mut("qq")
+        .unwrap()
+        .backend = Some(backend.clone());
+    let held = service.gate.acquire().await.unwrap();
+    let cancelled = start_read(&service, "qq");
+    tokio::task::yield_now().await;
+    cancelled.abort();
+    assert!(cancelled.await.unwrap_err().is_cancelled());
+    let waiting = start_read(&service, "qq");
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_secs(5)).await;
+    assert!(
+        waiting
+            .await
+            .unwrap()
+            .unwrap_err()
+            .0
+            .contains("this call did not start")
+    );
+    assert!(started.try_recv().is_err());
+    drop(held);
+    let active = start_read(&service, "qq");
+    assert_eq!(started.recv().await, Some("read"));
+    active.abort();
+    assert!(active.await.unwrap_err().is_cancelled());
+    assert_eq!(service.gate.available_permits(), 1);
+    backend.release.add_permits(1);
+    start_read(&service, "qq").await.unwrap().unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn sends_do_not_block_reads_and_concurrent_duplicate_sends_are_deduplicated() {
+    let (_dir, _, _, _, original) = setup();
+    let mut service = (*original).clone();
+    service.gate = Arc::new(tokio::sync::Semaphore::new(4));
+    let (backend, mut started) = slow_backend();
+    service
+        .accounts
+        .write()
+        .unwrap()
+        .get_mut("qq")
+        .unwrap()
+        .backend = Some(backend.clone());
+    let service = Arc::new(service);
+    let args = json!({"account_id":"qq","to":["a@example.com"],"subject":"s","body":"b","request_id":"concurrent-send-0001"});
+    let send = |args: Value| {
+        let service = service.clone();
+        tokio::spawn(async move { service.dispatch("send_email", args).await })
+    };
+    let first = send(args.clone());
+    assert_eq!(started.recv().await, Some("send"));
+    let duplicate = send(args);
+    let read = start_read(&service, "qq");
+    assert_eq!(started.recv().await, Some("read"));
+    tokio::task::yield_now().await;
+    assert!(started.try_recv().is_err());
+    backend.release.add_permits(2);
+    assert_eq!(first.await.unwrap().unwrap()["status"], "accepted_by_smtp");
+    assert_eq!(
+        duplicate.await.unwrap().unwrap()["status"],
+        "accepted_by_smtp"
+    );
+    read.await.unwrap().unwrap();
+    assert!(started.try_recv().is_err());
 }
 async fn mock_imap(
     script: Vec<(String, String)>,
@@ -920,6 +1093,7 @@ async fn two_account_sender_and_request_id_isolation() {
     let zju = Arc::new(Fake::default());
     let mut account = service.accounts.read().unwrap()["qq"].clone();
     account.id = "zju".into();
+    account.concurrency = Default::default();
     account.name = "Mock ZJU".into();
     account.config.username = "school@zju.example".into();
     account.config.from_address = "school@zju.example".into();

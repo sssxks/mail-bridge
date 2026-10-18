@@ -403,7 +403,7 @@ pub fn router_with_events(
         setup: Arc::new(crate::account_setup::AccountSetup::default()),
         mail: mail.clone(),
         auth: auth.clone(),
-        requests: Arc::new(Semaphore::new(4)),
+        requests: Arc::new(Semaphore::new(16)),
         attempts: Arc::new(Mutex::new(Vec::new())),
         events: events.clone(),
     };
