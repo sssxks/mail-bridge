@@ -17,6 +17,20 @@
 QQ 使用邮箱客户端授权码；浙大启用二次认证时使用客户端专用密码。
 网页当前支持 TLS / STARTTLS + 密码认证，不包含邮箱服务商专用 OAuth。
 
+## 已迁移安装的常规升级
+
+在本地构建 Linux 发布版，将二进制与 `scripts/upgrade-mail-bridge.sh`、
+`scripts/verify-mail-bridge-upgrade.py` 上传到服务器的暂存目录，然后执行：
+
+```bash
+sudo bash STAGE/upgrade-mail-bridge.sh STAGE EXPECTED_SHA256 PUBLIC_HTTPS_ORIGIN
+```
+
+脚本创建服务器私有备份，停服备份数据库，替换二进制，移除 Events 的显式
+关闭配置以使用默认启用行为，再启动并验证 HTTPS 工具与事件目录。
+账户、OAuth 和发送记录在服务器内部逐项比对，不导出秘密。失败时恢复旧
+二进制和配置，保留当前数据库。此流程不重复运行旧账户迁移。
+
 ## 从 0.3 一次性迁移
 
 `migrate-accounts.py` 是离线迁移工具，不是运行时配置回退路径。服务必须停止。
