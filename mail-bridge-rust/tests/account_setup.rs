@@ -78,6 +78,56 @@ fn hidden(page: &str) -> Params {
         })
         .collect()
 }
+
+#[test]
+fn invitation_requires_opening_rotates_csrf_and_saves_once() {
+    let (_dir, settings, db, auth, mail) = fixture();
+    let setup = AccountSetup::default();
+    let invitation = setup.begin("client-a", &settings.public_url).unwrap();
+    let id = invitation["setup_id"].as_str().unwrap();
+    let url = url::Url::parse(invitation["setup_url"].as_str().unwrap()).unwrap();
+    let ticket = url
+        .query_pairs()
+        .find(|(key, _)| key == "ticket")
+        .unwrap()
+        .1
+        .into_owned();
+    let mut unopened = fields("work");
+    unopened.insert("ticket".into(), ticket.clone());
+    unopened.insert("owner_password".into(), OWNER.into());
+    unopened.insert("_csrf".into(), "invented".into());
+    assert!(setup.submit(unopened, "invented", &auth, &mail).is_err());
+
+    let (first, _) = setup.page(&ticket, &auth).unwrap();
+    let (second, _) = setup.page(&ticket, &auth).unwrap();
+    let mut stale = hidden(&first);
+    let stale_csrf = stale["_csrf"].clone();
+    stale.extend(fields("work"));
+    stale.insert("owner_password".into(), OWNER.into());
+    assert!(setup.submit(stale, &stale_csrf, &auth, &mail).is_err());
+
+    let mut current = hidden(&second);
+    let csrf = current["_csrf"].clone();
+    current.extend(fields("work"));
+    current.insert("owner_password".into(), OWNER.into());
+    let mut invalid = current.clone();
+    invalid.insert("imap_port".into(), "0".into());
+    assert!(setup.submit(invalid, &csrf, &auth, &mail).is_err());
+    assert!(db.runtime_accounts().unwrap().is_empty());
+    let pending = setup.status("client-a", id).unwrap();
+    assert_eq!(pending["status"], "pending");
+    assert_eq!(pending["account_id"], Value::Null);
+
+    assert_eq!(
+        setup.submit(current.clone(), &csrf, &auth, &mail).unwrap(),
+        "work"
+    );
+    assert!(setup.submit(current, &csrf, &auth, &mail).is_err());
+    assert!(setup.page(&ticket, &auth).is_err());
+    assert_eq!(setup.status("client-a", id).unwrap()["account_id"], "work");
+    assert_eq!(db.runtime_accounts().unwrap().len(), 1);
+}
+
 async fn request(
     app: Router,
     path: &str,
