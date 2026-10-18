@@ -602,11 +602,10 @@ impl MailService {
                     subject: Box<str>,
                     body: Box<str>,
                     request_id: String,
-                    confirm_send: bool,
                 }
                 let send: Send = serde_json::from_value(args).map_err(|_| {
                     Error(
-                        "Explicit recipients, subject, body, request_id and confirmation required",
+                        "Recipients, subject, body and request_id required",
                     )
                 })?;
                 let draft = RawDraft {
@@ -614,9 +613,9 @@ impl MailService {
                     subject: send.subject,
                     body: send.body,
                 }.parse()?;
-                if !send.confirm_send || !account.config.smtp_enabled {
+                if !account.config.smtp_enabled {
                     return Err(Error(
-                        "Explicit send confirmation and locally enabled SMTP are required",
+                        "SMTP is disabled for this account",
                     ));
                 }
                 if !(16..=80).contains(&send.request_id.len())

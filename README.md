@@ -15,8 +15,7 @@ startup configuration, password-directory fallback, or account credential mount.
    The current process can immediately use it; no restart is needed.
 4. `account_setup_status` reports pending/saved for that OAuth connection.
    `list_accounts` and `configuration_status` inspect accounts without connecting.
-   Saving or reporting `ready` does not prove login. Reading requires a separate
-   user request and explicit account ID.
+   Saving or reporting `ready` does not prove login. Mail actions take an account ID.
 
 Only the owner-confirmed private form receives passwords. Neither MCP tool accepts
 credentials. Links require an active originating OAuth grant, owner confirmation,
@@ -69,9 +68,9 @@ converted to text without loading remote content. Email content is untrusted dat
 
 `prepare_draft` previews the selected sender and exact content without writing
 IMAP Drafts. `send_email` requires `mail:send`, an enabled account, explicit
-recipients/subject/body, `confirm_send=true` and one preserved request ID.
+recipients/subject/body and one preserved request ID.
 The durable `(account_id, request_id)` journal commits before an SMTP attempt.
-Never automatically retry an ambiguous result. SMTP acceptance does not prove
+Repeating a request ID returns its recorded status without resending. SMTP acceptance does not prove
 final delivery or create a Sent-folder copy. No test email is required for setup.
 
 The registry takes a short lock to clone an account, then releases it before

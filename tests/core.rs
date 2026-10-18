@@ -355,7 +355,7 @@ async fn literal_limit_before_parser_allocation() {
 #[tokio::test]
 async fn durable_send_dedup_and_ambiguous_failure() {
     let (dir, _settings, db, fake, service) = setup();
-    let args = json!({"account_id":"qq","to":["a@example.com"],"subject":"中文","body":"正文","request_id":"send-request-00001","confirm_send":true});
+    let args = json!({"account_id":"qq","to":["a@example.com"],"subject":"中文","body":"正文","request_id":"send-request-00001"});
     assert_eq!(
         service.dispatch("send_email", args.clone()).await.unwrap()["status"],
         "accepted_by_smtp"
@@ -387,9 +387,15 @@ async fn durable_send_dedup_and_ambiguous_failure() {
         "unknown_do_not_retry"
     );
     assert_eq!(fake.sent.load(Ordering::SeqCst), 2);
-    let mut unconfirmed = args;
-    unconfirmed["confirm_send"] = json!(false);
-    assert!(service.dispatch("send_email", unconfirmed).await.is_err());
+    service
+        .accounts
+        .write()
+        .unwrap()
+        .get_mut("qq")
+        .unwrap()
+        .config
+        .smtp_enabled = false;
+    assert!(service.dispatch("send_email", args).await.is_err());
     let _permit = service.gate.acquire().await.unwrap();
     assert!(
         service
@@ -745,7 +751,7 @@ async fn oauth_pkce_mcp_and_scope_for_callback(callback: &str) {
         serde_json::from_slice::<Value>(&bytes).unwrap()["result"]["isError"],
         false
     );
-    let(_,_,bytes)=request(app.clone(),"/mcp","POST",json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"send_email","arguments":{"account_id":"qq","to":["a@example.com"],"subject":"subject","body":"body","request_id":"request-000000001","confirm_send":true}}}).to_string(),Some(token),None,None).await;
+    let(_,_,bytes)=request(app.clone(),"/mcp","POST",json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"send_email","arguments":{"account_id":"qq","to":["a@example.com"],"subject":"subject","body":"body","request_id":"request-000000001"}}}).to_string(),Some(token),None,None).await;
     assert_eq!(
         serde_json::from_slice::<Value>(&bytes).unwrap()["result"]["isError"],
         true
@@ -949,7 +955,6 @@ async fn two_account_sender_and_request_id_isolation() {
         .unwrap();
     assert_eq!(preview["account_id"], "zju");
     assert_eq!(preview["from_address"], "school@zju.example");
-    send["confirm_send"] = json!(true);
     send["request_id"] = json!("shared-request-000001");
     for id in ["qq", "zju"] {
         send["account_id"] = json!(id);
@@ -1005,7 +1010,7 @@ async fn two_account_sender_and_request_id_isolation() {
     );
     assert_eq!(qq.sent.load(Ordering::SeqCst), 1);
     assert_eq!(zju.sent.load(Ordering::SeqCst), 1);
-    for tool in mail_bridge_rust::mcp::tools() {
+    for tool in mail_bridge_rust::mcp::TOOLS.iter() {
         if !matches!(
             tool.name.as_ref(),
             "configuration_status"

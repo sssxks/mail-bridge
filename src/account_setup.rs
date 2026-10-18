@@ -65,7 +65,7 @@ impl AccountSetup {
         );
         Ok(
             json!({"setup_id": setup_id, "setup_url": format!("{base}/accounts/setup?ticket={ticket}"), "expires_at": expires,
-            "status": "pending", "instructions": "Open the private link and enter the owner password and mailbox credential there. Never paste credentials into chat. Saving activates configuration without testing login or enabling SMTP/events."}),
+            "status": "pending"}),
         )
     }
     /// Report progress only to the originating client while the invitation lives.
