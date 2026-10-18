@@ -32,7 +32,8 @@ access until it actually succeeds. Follow the host's supported OAuth flow; the
 owner enters the separate owner password privately. Mailbox client passwords
 remain on the owner's server and are never requested in chat or plugin fields.
 
-scripts/setup-mail-bridge.sh is for the owner to run manually in a private SSH
-terminal only. Do not execute its credential-entry path or generate credentials
-on the user's behalf. It does not start the service, enable SMTP/events or connect
-to a mailbox. See README.md for exact manual steps and current limitations.
+Server setup scripts belong to the server project and are not included in this
+plugin. The owner must enter server credentials manually in a private SSH
+terminal. Do not execute credential-entry paths or generate credentials on the
+user's behalf. See README.md for the server setup documentation and connection
+limitations.

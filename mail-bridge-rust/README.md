@@ -123,6 +123,10 @@ local HTTP MCP client. ChatGPT Work/Cloud, mobile and dots require a reachable
 HTTPS endpoint with the process running on your own host. Plugin packaging does
 not host it. No stdio or desktop hook is claimed to provide cloud delivery.
 
+The manual private-configuration helper lives in [deploy/setup-mail-bridge.sh](deploy/setup-mail-bridge.sh).
+See [server setup instructions](deploy/SETUP.md) for prerequisites, installation
+and owner-only credential entry. It does not install or start the service.
+
 Deployment templates in deploy/ are for review, not an installation script:
 place the binary under /opt/mail-bridge-rust, private configuration under
 /etc/mail-bridge-rust, and review the systemd unit/environment file. On systemd252,
