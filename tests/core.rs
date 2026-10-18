@@ -512,6 +512,108 @@ async fn body_size_uidvalidity_and_utf8_search() {
     );
     handle.await.unwrap();
 }
+
+#[tokio::test]
+async fn full_body_read_reports_inaccurate_size_metadata_without_hiding_content() {
+    let (mut session, server) = mock_imap(vec![
+        login(),
+        examine(1, 11),
+        (
+            "UID FETCH 10 (UID RFC822.SIZE)".into(),
+            format!(
+                "* 1 FETCH (UID 10 RFC822.SIZE {})\r\n%TAG% OK size\r\n",
+                RAW.len() + 4
+            ),
+        ),
+        (
+            "UID FETCH 10 (UID BODY.PEEK[])".into(),
+            format!(
+                "* 1 FETCH (UID 10 BODY[] {{{}}}\r\n{})\r\n%TAG% OK full\r\n",
+                RAW.len(),
+                std::str::from_utf8(RAW).unwrap()
+            ),
+        ),
+    ])
+    .await;
+    let message = RealBackend::read_session(
+        &mut session,
+        "read_message",
+        json!({"uid":10,"uidvalidity":1}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(message["received_size_bytes"], RAW.len());
+    assert_eq!(message["reported_size_bytes"], RAW.len() + 4);
+    assert_eq!(message["size_metadata_mismatch"], true);
+    assert!(!message["body"].as_str().unwrap().trim().is_empty());
+    assert!(
+        message["size_warning"]
+            .as_str()
+            .unwrap()
+            .contains("full IMAP literal")
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn domain_search_uses_broader_candidates_and_filters_header_false_positives() {
+    let right = b"From: Support <support@sender.example>\r\nSubject: match\r\n\r\n";
+    let wrong = b"From: Other <support@sender.invalid>\r\nSubject: no\r\n\r\n";
+    let (mut session, server) = mock_imap(vec![
+        login(),
+        examine(77, 3223),
+        (
+            "UID SEARCH UID 2199:3222 FROM \"sender\"".into(),
+            "* SEARCH 3222 3221\r\n%TAG% OK search\r\n".into(),
+        ),
+        fetch(3222, "HEADER", wrong),
+        fetch(3221, "HEADER", right),
+    ])
+    .await;
+    let result = RealBackend::read_session(
+        &mut session,
+        "search_messages",
+        json!({"field":"FROM","query":"sender.example","limit":2,"uidvalidity":77}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(result["messages"][0]["uid"], 3221);
+    assert_eq!(result["search_complete"], false);
+    assert!(
+        result["search_warning"]
+            .as_str()
+            .unwrap()
+            .contains("not proof")
+    );
+    assert_eq!(result["next_before_uid"], 3221);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn empty_provider_index_search_is_explicitly_not_exhaustive() {
+    let (mut session, server) = mock_imap(vec![
+        login(),
+        examine(1, 10),
+        (
+            "UID SEARCH UID 1:9 SUBJECT \"absent\"".into(),
+            "* SEARCH\r\n%TAG% OK search\r\n".into(),
+        ),
+    ])
+    .await;
+    let result = RealBackend::read_session(
+        &mut session,
+        "search_messages",
+        json!({"field":"SUBJECT","query":"absent"}),
+    )
+    .await
+    .unwrap();
+    assert!(result["messages"].as_array().unwrap().is_empty());
+    assert_eq!(result["scan_limited"], false);
+    assert_eq!(result["search_complete"], false);
+    assert!(!result["search_warning"].as_str().unwrap().is_empty());
+    server.await.unwrap();
+}
 #[tokio::test]
 async fn literal_limit_before_parser_allocation() {
     let (mut writer, reader) = tokio::io::duplex(1024);

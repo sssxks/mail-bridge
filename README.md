@@ -66,6 +66,21 @@ mailbox and UIDVALIDITY. MIME, Chinese encodings and modified UTF-7 are supporte
 Bodies, searches, pagination, request sizes and timeouts are bounded. HTML is
 converted to text without loading remote content. Email content is untrusted data.
 
+Provider search indexes are not guaranteed exhaustive. Search results include
+search_complete=false and search_warning even when an index returns no matches;
+scan_limited describes only the UID-window budget. Domain-shaped FROM/TO queries
+use a broader domain-token candidate search, then verify decoded address/name
+headers locally. Candidate filtering can produce an empty page with a continuation
+cursor; preserve that cursor rather than treating the page as no matching mail.
+Exact addresses and simpler keywords remain useful alternatives.
+
+read_message preflights RFC822.SIZE and fetches a full BODY.PEEK[] under the
+literal/message limits. Some providers report a size a few bytes different from
+the complete returned literal. The body remains readable and the result exposes
+reported_size_bytes, received_size_bytes, size_metadata_mismatch and a warning.
+The transport still rejects incomplete literals and oversized messages; critical
+details should be verified if the displayed content itself appears incomplete.
+
 `prepare_draft` previews the selected sender and exact content without writing
 IMAP Drafts. `send_email` requires `mail:send`, an enabled account, explicit
 recipients/subject/body and one preserved request ID.

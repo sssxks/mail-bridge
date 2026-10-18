@@ -1,4 +1,23 @@
-# MCP Events / message.created (0.3)
+# MCP Events / message.created (0.4)
+
+## Discovery metadata and live acceptance
+
+The current event catalog description and payload schema include subject, from
+and date header summaries. They do not include message bodies or attachments.
+After deploying metadata changes, refresh the registered MCP connection and
+discover its events again; a platform-cached description that says headers are
+absent does not describe this server's current event. Do not widen payloads or
+permissions merely to reconcile that cached description.
+
+Live platform acceptance on 2026-10-18 UTC confirmed both authorized INBOX
+subscriptions and both existing test messages, including reading the event UID:
+- ZJU event at19:18:29, callback acknowledged2xx at19:18:30.
+- QQ event at19:19:02, callback acknowledged2xx at19:19:03, dot woke at19:20:37.
+Thus QQ's callback-to-wake interval was about94s. The mail Date-to-event interval
+was53s, but includes unknown transport/INBOX-arrival time and cannot by itself
+measure watcher latency. HTTP2xx acknowledges receipt; platform processing is
+asynchronous. Neither a successful schema discovery nor a2xx alone proves that
+the subscribed conversation actually woke.
 
 ## Coremail compatibility and operational diagnostics
 

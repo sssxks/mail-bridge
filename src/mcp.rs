@@ -53,7 +53,7 @@ pub static TOOLS: LazyLock<[Tool; 8]> = LazyLock::new(|| {
         ),
         (
             "search_messages",
-            "Search messages by field. Uses the same pagination as list_messages.",
+            "Search provider-indexed messages by field. Empty results may be incomplete; inspect search_warning and preserve pagination. Domain-shaped FROM/TO queries use broader candidates verified against decoded headers.",
             search,
             vec!["field", "query"],
         ),

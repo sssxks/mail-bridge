@@ -42,6 +42,46 @@ impl SearchCriteria {
     pub(super) fn query(&self) -> &str {
         &self.query
     }
+    /// QQ indexes domain punctuation differently from RFC substring search.
+    /// Broaden only domain-shaped address queries; verify returned headers below.
+    pub(super) fn domain_candidate(&self) -> Option<Self> {
+        if !matches!(self.field, "FROM" | "TO")
+            || !self.query.contains('.')
+            || !self
+                .query
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+            || self.query.split('.').any(str::is_empty)
+        {
+            return None;
+        }
+        Some(Self {
+            field: self.field,
+            query: self.query.split('.').next()?.into(),
+        })
+    }
+    /// Match decoded address/name substrings, including grouped addresses.
+    pub(super) fn matches_header(&self, raw: &[u8]) -> bool {
+        let Some(mail) = mail_parser::MessageParser::default().parse(raw) else {
+            return false;
+        };
+        let addresses = match self.field {
+            "FROM" => mail.from(),
+            "TO" => mail.to(),
+            _ => return false,
+        };
+        let query = self.query.to_lowercase();
+        addresses.is_some_and(|a| {
+            a.iter().any(|a| {
+                a.address
+                    .as_deref()
+                    .is_some_and(|s| s.to_lowercase().contains(&query))
+                    || a.name
+                        .as_deref()
+                        .is_some_and(|s| s.to_lowercase().contains(&query))
+            })
+        })
+    }
 }
 
 /// `Latest | InMailbox(validity) | Before(validity, uid)`.

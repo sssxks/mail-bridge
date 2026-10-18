@@ -266,22 +266,26 @@ impl RealBackend {
                 return Err(Error("Message exceeds 2 MiB limit; use your mail client"));
             }
             let mut stream = session
-                .uid_fetch(
-                    a.uid.to_string(),
-                    format!("(UID BODY.PEEK[]<0.{}>)", MAX_MAIL + 1),
-                )
+                // The size preflight and GuardIo bound allocation. A full PEEK
+                // has an explicit complete literal, unlike a requested prefix.
+                .uid_fetch(a.uid.to_string(), "(UID BODY.PEEK[])")
                 .await
                 .map_err(safe)?;
             let mut result = None;
             while let Some(f) = stream.try_next().await.map_err(safe)? {
                 if f.uid == Some(a.uid) {
                     let body = f.body().ok_or(Error("Body unavailable"))?;
-                    if body.len() != size as usize {
-                        return Err(Error("Body changed or was truncated"));
-                    }
                     let mut value = parse_mail(body, true)?;
                     value["uid"] = json!(a.uid);
                     value["uidvalidity"] = json!(a.uidvalidity);
+                    value["reported_size_bytes"] = json!(size);
+                    value["received_size_bytes"] = json!(body.len());
+                    value["size_metadata_mismatch"] = json!(body.len() != size as usize);
+                    if body.len() != size as usize {
+                        value["size_warning"] = json!(
+                            "Provider RFC822.SIZE differs from the full IMAP literal. Body was fetched in full; verify critical details against the original message if content appears incomplete."
+                        );
+                    }
                     result = Some(value);
                 }
             }
@@ -319,6 +323,7 @@ impl RealBackend {
         };
         let mut uids = Vec::new();
         let mut next = None;
+        let candidate = a.search().and_then(SearchCriteria::domain_candidate);
         // Bounded UID windows, never materialize an all-mailbox SEARCH result.
         for _ in 0..8 {
             if upper == 0 {
@@ -327,7 +332,7 @@ impl RealBackend {
             let lower = upper.saturating_sub(1023).max(1);
             let range = format!("UID {lower}:{upper}");
             let found = if let Some(criteria) = a.search() {
-                search(session, &range, criteria).await?
+                search(session, &range, candidate.as_ref().unwrap_or(criteria)).await?
             } else {
                 session.uid_search(&range).await.map_err(safe)?
             };
@@ -357,21 +362,35 @@ impl RealBackend {
                 .map_err(safe)?;
             while let Some(fetch) = stream.try_next().await.map_err(safe)? {
                 if fetch.uid == Some(uid) {
-                    let mut message = parse_mail(
-                        fetch
-                            .header()
-                            .or_else(|| fetch.body())
-                            .ok_or(Error("Header unavailable"))?,
-                        false,
-                    )?;
+                    let raw = fetch
+                        .header()
+                        .or_else(|| fetch.body())
+                        .ok_or(Error("Header unavailable"))?;
+                    if candidate.is_some()
+                        && a.search()
+                            .is_some_and(|criteria| !criteria.matches_header(raw))
+                    {
+                        continue;
+                    }
+                    let mut message = parse_mail(raw, false)?;
                     message["uid"] = json!(uid);
                     messages.push(message);
                 }
             }
         }
-        Ok(
-            json!({"messages":messages,"uidvalidity":validity,"next_before_uid":next,"scan_limited":upper>0}),
-        )
+        let mut result = json!({"messages":messages,"uidvalidity":validity,"next_before_uid":next,"scan_limited":upper>0});
+        if a.search().is_some() {
+            result["search_complete"] = json!(false);
+            result["search_strategy"] = json!(if candidate.is_some() {
+                "domain_token_candidates_with_header_verification"
+            } else {
+                "provider_index"
+            });
+            result["search_warning"] = json!(
+                "Provider search indexes can omit matches. An empty result is not proof that no matching mail exists. Continue with next_before_uid when present; try an exact address, a simpler keyword, or the mail provider's client."
+            );
+        }
+        Ok(result)
     }
 }
 pub async fn search<
