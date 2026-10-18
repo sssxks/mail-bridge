@@ -63,6 +63,27 @@ fn private(mut response: Response) -> Response {
     );
     response
 }
+async fn privacy_headers(request: Request, next: Next) -> Response {
+    private(next.run(request).await)
+}
+
+async fn health() -> Json<serde_json::Value> {
+    Json(json!({"status": "ok"}))
+}
+
+async fn ready(State(state): State<App>) -> Response {
+    // Never wait for a busy database mutex on the single-threaded runtime.
+    // Check the account store without reading credentials or contacting providers.
+    let available = state.mail.db.0.try_lock().is_ok_and(|db| {
+        db.prepare("SELECT id FROM runtime_accounts LIMIT 0")
+            .is_ok()
+    });
+    if available {
+        health().await.into_response()
+    } else {
+        error(StatusCode::SERVICE_UNAVAILABLE)
+    }
+}
 async fn limits(State(state): State<App>, mut request: Request, next: Next) -> Response {
     let Ok(_permit) = state.requests.clone().try_acquire_owned() else {
         return error(StatusCode::TOO_MANY_REQUESTS);
@@ -413,6 +434,8 @@ pub fn router_with_events(
         .route_service("/mcp", service)
         .route_layer(middleware::from_fn_with_state(state.clone(), authenticated));
     Router::new()
+        .route("/healthz", get(health))
+        .route("/readyz", get(ready))
         .route("/.well-known/oauth-protected-resource", get(resource))
         .route("/.well-known/oauth-protected-resource/mcp", get(resource))
         .route("/.well-known/oauth-authorization-server", get(metadata))
@@ -424,6 +447,8 @@ pub fn router_with_events(
         .merge(mcp_routes)
         .layer(DefaultBodyLimit::max(65536))
         .layer(middleware::from_fn_with_state(state, limits))
+        // Outermost: include overload, timeout, extraction and routing errors.
+        .layer(middleware::from_fn(privacy_headers))
 }
 
 /// A permit lives for the entire TCP connection, including idle keepalive time.

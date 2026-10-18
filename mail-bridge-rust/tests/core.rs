@@ -795,6 +795,106 @@ async fn oauth_pkce_mcp_and_scope_for_callback(callback: &str) {
     );
 }
 #[tokio::test]
+async fn probes_check_local_state_without_mail_access() {
+    let (_dir, settings, db, fake, mail) = setup();
+    let app = router(&settings, Arc::new(Auth::new(&settings, db.clone())), mail);
+    for path in ["/healthz", "/readyz"] {
+        let (status, headers, body) =
+            request(app.clone(), path, "GET", String::new(), None, None, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["cache-control"], "no-store");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({"status":"ok"})
+        );
+    }
+    db.0.lock()
+        .unwrap()
+        .execute("DROP TABLE runtime_accounts", [])
+        .unwrap();
+    assert_eq!(
+        request(
+            app.clone(),
+            "/readyz",
+            "GET",
+            String::new(),
+            None,
+            None,
+            None
+        )
+        .await
+        .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        request(app, "/healthz", "GET", String::new(), None, None, None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(fake.sent.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn privacy_headers_cover_rejections_and_rate_limits() {
+    let (_dir, settings, db, _fake, mail) = setup();
+    let app = router(&settings, Arc::new(Auth::new(&settings, db)), mail);
+    for (path, method, body, origin, expected) in [
+        (
+            "/missing",
+            "GET",
+            String::new(),
+            None,
+            StatusCode::NOT_FOUND,
+        ),
+        ("/mcp", "POST", "{}".into(), None, StatusCode::UNAUTHORIZED),
+        (
+            "/oauth/register",
+            "POST",
+            "x".repeat(65537),
+            None,
+            StatusCode::PAYLOAD_TOO_LARGE,
+        ),
+        (
+            "/oauth/authorize",
+            "POST",
+            String::new(),
+            Some("https://evil.example"),
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        let (status, headers, _) =
+            request(app.clone(), path, method, body, None, None, origin).await;
+        assert_eq!(status, expected);
+        assert_eq!(headers["cache-control"], "no-store");
+        assert_eq!(headers["referrer-policy"], "no-referrer");
+        assert_eq!(headers["x-content-type-options"], "nosniff");
+    }
+    for attempt in 0..11 {
+        let (status, headers, _) = request(
+            app.clone(),
+            "/oauth/authorize",
+            "POST",
+            String::new(),
+            None,
+            None,
+            Some("https://mail.example.com"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            if attempt < 10 {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            }
+        );
+        assert_eq!(headers["cache-control"], "no-store");
+        assert_eq!(headers["x-content-type-options"], "nosniff");
+    }
+}
+
+#[tokio::test]
 async fn local_http_socket_smoke() {
     let (_dir, settings, db, _fake, mail) = setup();
     let app = router(&settings, Arc::new(Auth::new(&settings, db)), mail);
