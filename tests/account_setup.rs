@@ -389,13 +389,14 @@ async fn store_duplicate_limit_commit_failure_and_existing_smtp_policy() {
     // Imported accounts can retain an explicitly enabled SMTP policy.
     db.0.lock().unwrap().execute("UPDATE runtime_accounts SET config=json_set(config,'$.smtp_host','smtp.example.com','$.smtp_port',465,'$.smtp_enabled',json('true')) WHERE id='same'",[]).unwrap();
     let restored = MailService::from_store(db).unwrap();
-    assert_eq!(
-        restored
-            .dispatch("configuration_status", json!({"account_id":"same"}))
-            .await
-            .unwrap()["accounts"][0]["smtp_enabled"],
-        true
-    );
+    let listed = restored.dispatch("list_accounts", json!({})).await.unwrap();
+    let account = listed["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|account| account["account_id"] == "same")
+        .unwrap();
+    assert_eq!(account["smtp_enabled"], true);
 }
 
 #[test]

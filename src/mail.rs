@@ -537,25 +537,13 @@ impl MailService {
         Ok(())
     }
     pub async fn dispatch(&self, name: &str, mut args: Value) -> Result<Value> {
-        if name == "list_accounts" || name == "configuration_status" {
+        if name == "list_accounts" {
             let object = args.as_object().ok_or(Error("Invalid arguments"))?;
-            if object.keys().any(|key| key != "account_id")
-                || (name == "list_accounts" && !object.is_empty())
-            {
+            if !object.is_empty() {
                 return Err(Error("Unexpected arguments"));
             }
             let accounts = self.accounts.read().map_err(safe)?;
-            let statuses = if let Some(id) = object.get("account_id") {
-                let id = id.as_str().ok_or(Error("Invalid account_id"))?;
-                vec![
-                    accounts
-                        .get(id)
-                        .ok_or(Error("Unknown account_id; use list_accounts"))?
-                        .status(),
-                ]
-            } else {
-                accounts.values().map(MailAccount::status).collect()
-            };
+            let statuses: Vec<_> = accounts.values().map(MailAccount::status).collect();
             return Ok(
                 json!({"accounts":statuses,"account_count":accounts.len(),"max_mail_bytes":MAX_MAIL,"mail_concurrency":1,"transport":"streamable_http"}),
             );

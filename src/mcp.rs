@@ -15,8 +15,8 @@ pub struct Mcp {
     pub events: Option<Arc<crate::events::Events>>,
 }
 /// Fixed tool catalog, initialized once and shared for the process lifetime.
-/// Listing clones the catalog; lookup scans nine entries and clones only the match.
-pub static TOOLS: LazyLock<[Tool; 9]> = LazyLock::new(|| {
+/// Listing clones the catalog; lookup scans eight entries and clones only the match.
+pub static TOOLS: LazyLock<[Tool; 8]> = LazyLock::new(|| {
     let string = json!({"type":"string","minLength":1});
     let uid = json!({"type":"integer","minimum":1,"maximum":4294967295u64});
     let page = json!({"folder":{"type":"string","minLength":1,"maxLength":512},"limit":{"type":"integer","minimum":1,"maximum":20},"before_uid":uid,"uidvalidity":uid});
@@ -31,12 +31,6 @@ pub static TOOLS: LazyLock<[Tool; 9]> = LazyLock::new(|| {
             "begin_account_setup",
             "Create a private mailbox setup link valid for 10 minutes.",
             json!({}),
-            vec![],
-        ),
-        (
-            "configuration_status",
-            "Get configuration status for one or all accounts without connecting.",
-            json!({"account_id":{"type":"string","minLength":1,"maxLength":32}}),
             vec![],
         ),
         (
@@ -83,7 +77,7 @@ pub static TOOLS: LazyLock<[Tool; 9]> = LazyLock::new(|| {
         ),
     ];
     definitions.map(|(name,description,mut properties,mut required)|{
-        if !matches!(name, "list_accounts" | "configuration_status" | "begin_account_setup") {
+        if !matches!(name, "list_accounts" | "begin_account_setup") {
             properties["account_id"]=json!({"type":"string","pattern":"^[a-z0-9_-]{1,32}$"});
             required.push("account_id");
         }

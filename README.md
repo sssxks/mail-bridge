@@ -14,10 +14,10 @@ startup configuration, password-directory fallback, or account credential mount.
 3. Saving commits the account to SQLite and publishes it to the shared registry.
    The current process can immediately use it; no restart is needed.
 4. After the page reports success, use `list_accounts` to find the new account.
-   `configuration_status` also inspects accounts without connecting.
+   Listing accounts does not connect to the mailbox.
    Saving or reporting `ready` does not prove login. Mail actions take an account ID.
 
-Only the owner-confirmed private form receives passwords. Neither MCP tool accepts
+Only the owner-confirmed private form receives passwords. MCP tools do not accept
 credentials. Links require an active originating OAuth grant, owner confirmation,
 CSRF token, secure HttpOnly cookie and same-origin POST. They expire after ten
 minutes, are single use after saving, and are capped at eight invitations. New
