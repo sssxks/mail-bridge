@@ -6,7 +6,7 @@ use mail_bridge_rust::{
     auth::Auth,
     config::Settings,
     db::{Db, hash, now},
-    events::{Events, Filters, Scan, Snapshot, Source, Subscribe},
+    events::{Events, Filters, Scan, Snapshot, Source, Subscribe, message::MessageSummary},
     webhook::{self, CallbackError, Reply, Transport},
 };
 use rusqlite::params;
@@ -61,8 +61,8 @@ impl Source for Mail {
             Ok(Scan {
                 validity,
                 next_uid,
-                uids: if v == validity {
-                    ((uid + 1)..next_uid).collect()
+                messages: if v == validity {
+                    ((uid + 1)..next_uid).map(|id| MessageSummary::parse(id, b"Subject: =?utf-8?b?5Lit5paH?=\r\nFrom: Sender <sender@example.com>\r\nDate: Mon, 19 Oct 2026 12:00:00 +0800\r\n\r\n")).collect()
                 } else {
                     vec![]
                 },
@@ -238,8 +238,11 @@ async fn from_now_restart_signed_retry_and_account_isolation() {
     assert_eq!(q["data"]["uid"], z["data"]["uid"]);
     assert_ne!(q["eventId"], z["eventId"]);
     assert_ne!(q["data"]["account_id"], z["data"]["account_id"]);
-    assert_eq!(q["data"].as_object().unwrap().len(), 5);
-    assert!(q.get("subject").is_none());
+    assert_eq!(q["data"].as_object().unwrap().len(), 8);
+    assert_eq!(q["data"]["subject"], "中文");
+    assert_eq!(q["data"]["from"][0]["address"], "sender@example.com");
+    assert_eq!(q["data"]["date"], "2026-10-19T12:00:00+08:00");
+    assert!(q["data"].get("body").is_none());
 }
 #[tokio::test]
 async fn verification_errors_and_ssrf_are_rejected_before_mail_access() {

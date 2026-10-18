@@ -7,7 +7,10 @@ use crate::{
     safe,
     webhook::{self, Transport},
 };
-use futures_util::future::BoxFuture;
+use futures_util::{TryStreamExt, future::BoxFuture};
+
+pub mod message;
+use message::MessageSummary;
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -73,7 +76,7 @@ pub struct Snapshot {
 pub struct Scan {
     pub validity: u32,
     pub next_uid: u32,
-    pub uids: Vec<u32>,
+    pub messages: Vec<MessageSummary>,
     pub scanned_to: u32,
 }
 pub trait Source: Send + Sync {
@@ -93,6 +96,64 @@ pub struct ImapSource {
 impl ImapSource {
     pub fn new(db: Db) -> Self {
         Self { db }
+    }
+    /// Scan a bounded UID window and fetch at most 128 header summaries.
+    /// One SEARCH and one batched PEEK fetch use O(n log n + header bytes),
+    /// with n <= 1024 UIDs and at most 8 KiB per fetched header; no body fetches.
+    pub async fn scan_session<
+        T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + std::fmt::Debug + Send,
+    >(
+        session: &mut async_imap::Session<T>,
+        mailbox: &str,
+        validity: u32,
+        uid: u32,
+    ) -> Result<Scan> {
+        let selected = session.examine(utf7_encode(mailbox)).await.map_err(safe)?;
+        let current = selected.uid_validity.ok_or(Error("Missing UIDVALIDITY"))?;
+        let next = selected.uid_next.ok_or(Error("Missing UIDNEXT"))?;
+        let end = next.saturating_sub(1).min(uid.saturating_add(1024));
+        let mut uids = if current == validity && end > uid {
+            session
+                .uid_search(format!("UID {}:{end}", uid.saturating_add(1)))
+                .await
+                .map_err(safe)?
+                .into_iter()
+                .filter(|v| *v > uid && *v <= end)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        uids.sort_unstable();
+        let scanned_to = if uids.len() > MAX_QUEUE as usize {
+            uids.truncate(MAX_QUEUE as usize);
+            uids.last().copied().unwrap_or(uid)
+        } else {
+            end
+        };
+        let mut messages = Vec::with_capacity(uids.len());
+        if !uids.is_empty() {
+            let sequence = uids
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut fetched = session
+                .uid_fetch(sequence, "(UID BODY.PEEK[HEADER]<0.8192>)")
+                .await
+                .map_err(safe)?;
+            while let Some(fetch) = fetched.try_next().await.map_err(safe)? {
+                if let Some(id) = fetch.uid.filter(|id| uids.binary_search(id).is_ok()) {
+                    let raw = fetch.header().ok_or(Error("Event header unavailable"))?;
+                    messages.push(MessageSummary::parse(id, raw));
+                }
+            }
+        }
+        Ok(Scan {
+            validity: current,
+            next_uid: next,
+            messages,
+            scanned_to,
+        })
     }
     fn account(&self, id: &str) -> Result<RealBackend> {
         let account = self
@@ -129,32 +190,9 @@ impl Source for ImapSource {
     fn scan<'a>(&'a self, f: &'a Filters, validity: u32, uid: u32) -> BoxFuture<'a, Result<Scan>> {
         Box::pin(async move {
             let mut session = self.account(&f.account_id)?.connect().await?;
-            let selected = session
-                .examine(utf7_encode(&f.mailbox))
-                .await
-                .map_err(safe)?;
-            let current = selected.uid_validity.ok_or(Error("Missing UIDVALIDITY"))?;
-            let next = selected.uid_next.ok_or(Error("Missing UIDNEXT"))?;
-            let end = next.saturating_sub(1).min(uid.saturating_add(1024));
-            let mut uids = if current == validity && end > uid {
-                session
-                    .uid_search(format!("UID {}:{end}", uid.saturating_add(1)))
-                    .await
-                    .map_err(safe)?
-                    .into_iter()
-                    .filter(|v| *v > uid && *v <= end)
-                    .collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            };
-            uids.sort_unstable();
+            let scan = Self::scan_session(&mut session, &f.mailbox, validity, uid).await;
             let _ = session.logout().await;
-            Ok(Scan {
-                validity: current,
-                next_uid: next,
-                uids,
-                scanned_to: end,
-            })
+            scan
         })
     }
     fn wait<'a>(&'a self, f: &'a Filters) -> BoxFuture<'a, Result<()>> {
@@ -223,7 +261,7 @@ impl Events {
             ids.sort();
             ids.dedup();
         }
-        json!({"events":[{"name":EVENT,"description":"A newly observed IMAP message in one explicitly selected account/mailbox. No body, subject or sender is pushed. No historical replay.","delivery":["webhook"],"inputSchema":{"type":"object","properties":{"account_id":{"type":"string","enum":ids},"mailbox":{"type":"string","minLength":1,"maxLength":512}},"required":["account_id","mailbox"],"additionalProperties":false},"payloadSchema":{"type":"object","properties":{"account_id":{"type":"string"},"mailbox":{"type":"string"},"message_id":{"type":"string"},"uid":{"type":"integer"},"uidvalidity":{"type":"integer"}},"required":["account_id","mailbox","message_id","uid","uidvalidity"],"additionalProperties":false},"_meta":{"securitySchemes":[{"type":"oauth2","scopes":["mail:read"]}]}}]})
+        json!({"events":[{"name":EVENT,"description":"A newly observed IMAP message in one explicitly selected account/mailbox. Includes subject, sender and date headers; no body or attachments. No historical replay.","delivery":["webhook"],"inputSchema":{"type":"object","properties":{"account_id":{"type":"string","enum":ids},"mailbox":{"type":"string","minLength":1,"maxLength":512}},"required":["account_id","mailbox"],"additionalProperties":false},"payloadSchema":{"type":"object","properties":{"account_id":{"type":"string"},"mailbox":{"type":"string"},"message_id":{"type":"string"},"uid":{"type":"integer"},"uidvalidity":{"type":"integer"},"subject":{"type":["string","null"]},"from":{"type":"array","items":{"type":"object","properties":{"name":{"type":["string","null"]},"address":{"type":["string","null"]}},"required":["name","address"],"additionalProperties":false}},"date":{"type":["string","null"]}},"required":["account_id","mailbox","message_id","uid","uidvalidity"],"additionalProperties":false},"_meta":{"securitySchemes":[{"type":"oauth2","scopes":["mail:read"]}]}}]})
     }
     fn checked(&self, request: &Subscribe, with_secret: bool) -> Result<String> {
         if request.name != EVENT
@@ -565,24 +603,25 @@ impl Events {
             })
             .map_err(safe)?;
         let available = (MAX_QUEUE - pending).max(0) as usize;
-        let mut uids = scan.uids;
-        uids.retain(|uid| *uid > sub.uid);
-        uids.sort_unstable();
-        uids.dedup();
+        let mut messages = scan.messages;
+        messages.retain(|message| message.uid > sub.uid);
+        messages.sort_unstable_by_key(|message| message.uid);
+        messages.dedup_by_key(|message| message.uid);
         let mut watermark = sub.uid;
-        for uid in uids.iter().take(available) {
+        for message in messages.iter().take(available) {
+            let uid = message.uid;
             let stable =
                 hash(serde_json::to_vec(&json!([sub.filters, scan.validity, uid])).map_err(safe)?);
             let event = format!("evt_{stable}");
-            let body=serde_json::to_vec(&json!({"eventId":event,"name":EVENT,"timestamp":date(now()),"data":{"account_id":sub.filters.account_id,"mailbox":sub.filters.mailbox,"message_id":format!("imap_{stable}"),"uidvalidity":scan.validity,"uid":uid},"cursor":null})).map_err(safe)?;
+            let body=serde_json::to_vec(&json!({"eventId":event,"name":EVENT,"timestamp":date(now()),"data":{"account_id":sub.filters.account_id,"mailbox":sub.filters.mailbox,"message_id":format!("imap_{stable}"),"uidvalidity":scan.validity,"uid":uid,"subject":message.subject,"from":message.from,"date":message.date},"cursor":null})).map_err(safe)?;
             tx.execute(
                 "INSERT OR IGNORE INTO event_outbox VALUES (?,?,?,0,?)",
                 params![id, event, body, now()],
             )
             .map_err(safe)?;
-            watermark = *uid;
+            watermark = uid;
         }
-        if uids.len() <= available {
+        if messages.len() <= available {
             watermark = watermark.max(scan.scanned_to);
         }
         tx.execute(

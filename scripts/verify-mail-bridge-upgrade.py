@@ -38,6 +38,7 @@ try:
     assert 'confirm_send' not in send['inputSchema']['properties']
     events = rpc('events/list', {})['events']
     assert events[0]['name'] == 'message.created'
+    assert {'subject', 'from', 'date'} <= events[0]['payloadSchema']['properties'].keys()
     assert events[0]['_meta']['securitySchemes'][0]['scopes'] == ['mail:read']
     accounts = rpc('tools/call', {'name': 'list_accounts', 'arguments': {}})
     assert not accounts.get('isError')

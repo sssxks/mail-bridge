@@ -1198,3 +1198,83 @@ async fn two_account_sender_and_request_id_isolation() {
         }
     }
 }
+
+#[tokio::test]
+async fn event_scan_fetches_decoded_headers_without_bodies_or_seen_flags() {
+    use mail_bridge_rust::events::ImapSource;
+    let raw = "Subject: =?utf-8?b?5Lit5paH?=\r\nFrom: =?utf-8?b?5Lit5paH?= <sender@example.com>\r\nDate: Mon, 19 Oct 2026 12:00:00 +0800\r\n\r\n";
+    let (mut session, server) = mock_imap(vec![
+        login(),
+        examine(7, 13),
+        (
+            "UID SEARCH UID 11:12".into(),
+            "* SEARCH 12 11\r\n%TAG% OK search\r\n".into(),
+        ),
+        (
+            "UID FETCH 11,12 (UID BODY.PEEK[HEADER]<0.8192>)".into(),
+            format!(
+                "* 1 FETCH (UID 11 BODY[HEADER]<0> {{{}}}\r\n{})\r\n%TAG% OK fetched\r\n",
+                raw.len(),
+                raw
+            ),
+        ),
+        examine(8, 20),
+    ])
+    .await;
+    let scan = ImapSource::scan_session(&mut session, "INBOX", 7, 10)
+        .await
+        .unwrap();
+    assert_eq!(scan.scanned_to, 12); // UID 12 vanished between SEARCH and FETCH.
+    assert_eq!(scan.messages.len(), 1);
+    let message = &scan.messages[0];
+    assert_eq!(message.uid, 11);
+    assert_eq!(message.subject.as_deref(), Some("中文"));
+    assert_eq!(
+        serde_json::to_value(&message.from).unwrap(),
+        json!([{"name":"中文","address":"sender@example.com"}])
+    );
+    assert_eq!(message.date.as_deref(), Some("2026-10-19T12:00:00+08:00"));
+    let reset = ImapSource::scan_session(&mut session, "INBOX", 7, 12)
+        .await
+        .unwrap();
+    assert_eq!(reset.validity, 8);
+    assert!(reset.messages.is_empty()); // No header fetch after UIDVALIDITY changes.
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn event_scan_bounds_header_batches_and_resumes_the_uid_window() {
+    use mail_bridge_rust::events::ImapSource;
+    let ids = (1..=129)
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let batch = (1..=128)
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let (mut session, server) = mock_imap(vec![
+        login(),
+        examine(7, 130),
+        (
+            "UID SEARCH UID 1:129".into(),
+            format!("* SEARCH {ids}\r\n%TAG% OK search\r\n"),
+        ),
+        (
+            format!("UID FETCH {batch} (UID BODY.PEEK[HEADER]<0.8192>)"),
+            "%TAG% OK vanished\r\n".into(),
+        ),
+    ])
+    .await;
+    let scan = ImapSource::scan_session(&mut session, "INBOX", 7, 0)
+        .await
+        .unwrap();
+    assert_eq!(scan.scanned_to, 128);
+    assert!(scan.messages.is_empty());
+    server.await.unwrap();
+    let empty =
+        mail_bridge_rust::events::message::MessageSummary::parse(1, b"Date: invalid\r\n\r\n");
+    assert!(empty.subject.is_none());
+    assert!(empty.from.is_empty());
+    assert!(empty.date.is_none());
+}

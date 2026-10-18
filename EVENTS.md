@@ -47,7 +47,9 @@ TLS, disables environment proxies, redirects and connection reuse. DNS timeout5s
 connect5s/request10s, response8KiB. Private, link-local, multicast, mappedIPv6 and
 reserved addresses are rejected. No localhost exception exists in production.
 
-The source uses EXAMINE and UID SEARCH only, never bodies or read flags. IDLE is
+The source uses EXAMINE, UID SEARCH and batched BODY.PEEK[HEADER] fetches.
+Each scan fetches at most 128 headers, each capped at 8 KiB, without fetching
+bodies or changing read flags. IDLE is
 preferred with a30s wait/reconnect; absent IDLE, internal bounded30s checking is
 used. This fallback is internal ingestion, not a polling event delivery API.
 There are no IMAP listeners without accepted subscriptions. At most2 subscriptions
@@ -65,8 +67,14 @@ If UIDVALIDITY changes, begin from the new current UIDNEXT and mark truncated
 for refresh; unsupported gap/terminated controls are not delivered.
 
 Each JSON webhook contains eventId,name,timestamp,data,cursor:null. data contains
-only account_id,mailbox,message_id,uidvalidity,uid. No subject, sender, body or
-attachment is pushed; read content later through an explicit authenticated tool.
+account_id,mailbox,message_id,uidvalidity,uid plus subject,from,date. Subject
+is MIME-decoded text or null; from is an array of {name,address} with nullable
+fields; date is the RFC3339 Date header or null. Missing/unparseable headers
+use null or an empty sender array. Header parsing is bounded; subjects/names
+are capped at 1000 characters, addresses at 254, and senders at 20.
+No body or attachment is pushed. The three new fields are optional in the
+catalog for pre-upgrade queued events; newly queued events include all three.
+Summary values persist with the event, so retries preserve the exact payload.
 Headers: webhook-id=eventId, Unix webhook-timestamp, webhook-signature=v1,base64
 HMAC-SHA256(decoded whsec_ key, id+'.'+timestamp+'.'+exact body),
 X-MCP-Subscription-Id. Keys decode to24-64bytes. Rotation signs new+previous key
