@@ -100,9 +100,12 @@ impl Auth {
     }
     pub fn metadata(&self, resource: bool) -> Value {
         if resource {
-            json!({"resource":self.resource,"authorization_servers":[self.base],"scopes_supported":["mail:read","mail:send","mail:events"]})
+            json!({"resource":self.resource,"authorization_servers":[self.base],"scopes_supported":["mail:read"]})
         } else {
-            json!({"issuer":self.base,"authorization_endpoint":format!("{}/oauth/authorize",self.base),"token_endpoint":format!("{}/oauth/token",self.base),"registration_endpoint":format!("{}/oauth/register",self.base),"response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token"],"token_endpoint_auth_methods_supported":["none"],"code_challenge_methods_supported":["S256"],"scopes_supported":["mail:read","mail:send","mail:events"],"authorization_response_iss_parameter_supported":true})
+            // Some native clients request every advertised scope by default.
+            // RFC 8414 permits not advertising optional scopes; send/events
+            // remain available only when explicitly requested and authorized.
+            json!({"issuer":self.base,"authorization_endpoint":format!("{}/oauth/authorize",self.base),"token_endpoint":format!("{}/oauth/token",self.base),"registration_endpoint":format!("{}/oauth/register",self.base),"response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token"],"token_endpoint_auth_methods_supported":["none"],"code_challenge_methods_supported":["S256"],"scopes_supported":["mail:read"],"authorization_response_iss_parameter_supported":true})
         }
     }
     pub fn challenge(&self, scope: &str) -> String {

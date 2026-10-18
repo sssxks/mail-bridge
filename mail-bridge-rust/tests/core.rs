@@ -457,6 +457,14 @@ async fn oauth_pkce_mcp_and_scope_for_callback(callback: &str) {
         settings.redirects = vec!["http://127.0.0.1/callback".into()];
     }
     let auth = Arc::new(Auth::new(&settings, db.clone()));
+    assert_eq!(
+        auth.metadata(false)["scopes_supported"],
+        json!(["mail:read"])
+    );
+    assert_eq!(
+        auth.metadata(true)["scopes_supported"],
+        json!(["mail:read"])
+    );
     let app = router(&settings, auth.clone(), service);
     let (status, headers, _) = request(
         app.clone(),
@@ -532,6 +540,14 @@ async fn oauth_pkce_mcp_and_scope_for_callback(callback: &str) {
     let (status, headers, bytes) =
         request(app.clone(), &path, "GET", "".into(), None, None, None).await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["referrer-policy"], "strict-origin");
+    let callback_origin = url::Url::parse(callback)
+        .unwrap()
+        .origin()
+        .ascii_serialization();
+    let csp = headers["content-security-policy"].to_str().unwrap();
+    assert!(csp.contains(&format!("form-action 'self' {callback_origin};")));
+    assert!(!csp.contains("*"));
     let cookie = headers["set-cookie"]
         .to_str()
         .unwrap()
@@ -543,6 +559,50 @@ async fn oauth_pkce_mcp_and_scope_for_callback(callback: &str) {
     fields.insert(
         "owner_password".into(),
         settings.owner_password.as_str().to_owned(),
+    );
+    // Retain strict Origin, signed fields, cookie and owner-password checks.
+    for origin in [None, Some("null"), Some("https://evil.example")] {
+        let response = request(
+            app.clone(),
+            "/oauth/authorize",
+            "POST",
+            serde_urlencoded::to_string(&fields).unwrap(),
+            None,
+            Some(&cookie),
+            origin,
+        )
+        .await;
+        assert_eq!(response.0, StatusCode::FORBIDDEN);
+    }
+    assert_eq!(
+        request(
+            app.clone(),
+            "/oauth/authorize",
+            "POST",
+            serde_urlencoded::to_string(&fields).unwrap(),
+            None,
+            None,
+            Some(&settings.public_url)
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let mut tampered = fields.clone();
+    tampered.insert("scope".into(), "mail:read mail:send".into());
+    assert_eq!(
+        request(
+            app.clone(),
+            "/oauth/authorize",
+            "POST",
+            serde_urlencoded::to_string(&tampered).unwrap(),
+            None,
+            Some(&cookie),
+            Some(&settings.public_url)
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
     );
     let (status, headers, _) = request(
         app.clone(),

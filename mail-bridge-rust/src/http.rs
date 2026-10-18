@@ -51,10 +51,10 @@ fn private(mut response: Response) -> Response {
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("no-store"),
     );
-    response.headers_mut().insert(
-        header::REFERRER_POLICY,
-        header::HeaderValue::from_static("no-referrer"),
-    );
+    response
+        .headers_mut()
+        .entry(header::REFERRER_POLICY)
+        .or_insert(header::HeaderValue::from_static("no-referrer"));
     response.headers_mut().insert(
         header::X_CONTENT_TYPE_OPTIONS,
         header::HeaderValue::from_static("nosniff"),
@@ -195,10 +195,15 @@ async fn register(State(state): State<App>, headers: HeaderMap, body: Bytes) -> 
     }
 }
 async fn consent(State(state): State<App>, RawQuery(query): RawQuery) -> Response {
-    let result = form(query.unwrap_or_default().as_bytes())
-        .and_then(|params| state.auth.consent_form(&params));
+    let result = form(query.unwrap_or_default().as_bytes()).and_then(|params| {
+        let (page, cookie) = state.auth.consent_form(&params)?;
+        // consent_form validates this URI against the registered client and
+        // policy before its origin is admitted to the form's redirect CSP.
+        let callback = url::Url::parse(&params["redirect_uri"]).map_err(crate::safe)?;
+        Ok((page, cookie, callback.origin().ascii_serialization()))
+    });
     match result {
-        Ok((page, cookie)) => {
+        Ok((page, cookie, callback_origin)) => {
             let mut response = Response::new(Body::from(page));
             let headers = response.headers_mut();
             headers.insert(
@@ -206,11 +211,20 @@ async fn consent(State(state): State<App>, RawQuery(query): RawQuery) -> Respons
                 header::HeaderValue::from_static("text/html; charset=utf-8"),
             );
             headers.insert(header::SET_COOKIE, cookie.parse().expect("random cookie"));
+            // no-referrer makes browser form navigations serialize Origin as
+            // null. strict-origin preserves same-origin POST verification while
+            // keeping authorization query parameters out of Referer headers.
+            headers.insert(
+                header::REFERRER_POLICY,
+                header::HeaderValue::from_static("strict-origin"),
+            );
             headers.insert(
                 header::CONTENT_SECURITY_POLICY,
-                header::HeaderValue::from_static(
-                    "default-src 'none'; form-action 'self'; frame-ancestors 'none'",
-                ),
+                format!(
+                    "default-src 'none'; form-action 'self' {callback_origin}; frame-ancestors 'none'; base-uri 'none'"
+                )
+                .parse()
+                .expect("validated HTTP callback origin"),
             );
             headers.insert(
                 header::X_FRAME_OPTIONS,

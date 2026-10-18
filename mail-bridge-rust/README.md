@@ -93,6 +93,23 @@ systemd unit uses a private state directory and UMask=0077. Never share this DB.
 ## Run and deploy
 
 For a local build: `cargo test --locked`, then `cargo run --locked --release`.
+The repository's browser regression uses a separate browser profile, synthetic
+owner credentials and local-only services:
+
+```powershell
+cargo build --locked --manifest-path mail-bridge-rust/Cargo.toml
+uv run scripts/test-oauth-browser.py --browser "C:/Program Files/BraveSoftware/Brave-Browser/Application/brave.exe"
+```
+
+It exercises the actual HTML form, Secure cookie, Origin/Referer behavior, CSP
+redirect, PKCE callback and token exchange. The consent document uses
+`Referrer-Policy: strict-origin` so browser POSTs retain their real Origin without
+leaking authorization queries. Its form CSP permits self and the validated
+registered callback origin. Other responses retain `no-referrer`. Discovery
+advertises `mail:read` only so clients requesting all advertised scopes do not
+automatically ask for sending/events. Those optional scopes still require an
+explicit request and owner consent, as well as the existing feature controls.
+
 For Debian 12 amd64, extract the provided binary and verify SHA256SUMS. It requires
 glibc >=2.34, libgcc_s, libm and the ELF loader; Rust/Python/OpenSSL are not runtime
 dependencies. Build on a larger computer, not a 512 MiB mail bridge server:
