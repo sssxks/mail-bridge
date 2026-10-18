@@ -1,6 +1,6 @@
 ---
 name: mail-workflow
-description: Use when the user asks to inspect configured mailbox accounts, list/search/read mail, prepare a draft, explicitly send mail, or configure an authorized new-mail subscription through Mail Bridge.
+description: Use when the user asks to add a mailbox through a private setup page, inspect configured accounts, list/search/read mail, prepare a draft, explicitly send mail, or configure an authorized new-mail subscription through Mail Bridge.
 ---
 
 Use the connected mail-bridge tools. Start with list_accounts and configuration_status.
@@ -32,8 +32,15 @@ access until it actually succeeds. Follow the host's supported OAuth flow; the
 owner enters the separate owner password privately. Mailbox client passwords
 remain on the owner's server and are never requested in chat or plugin fields.
 
-Server setup scripts belong to the server project and are not included in this
-plugin. The owner must enter server credentials manually in a private SSH
-terminal. Do not execute credential-entry paths or generate credentials on the
-user's behalf. See README.md for the server setup documentation and connection
-limitations.
+When the user asks to add a mailbox, call begin_account_setup with no credentials
+and present the returned setup_url as a clickable private link. The owner enters
+the independent owner password, IMAP settings and mailbox password in that page.
+Never ask for these passwords in chat, fill them for the owner, or generate them.
+Keep setup_id to check account_setup_status for this connection. An invitation
+expires after ten minutes or a service restart; if expired, create another only
+when still needed. A saved account remains available through list_accounts.
+Saving commits and activates the account without a service restart. saved/ready
+does not prove login. Do not read mail just to validate setup unless requested.
+New accounts have SMTP disabled; setup creates no event subscription. Account
+credentials live in the server's private runtime database, never in this plugin.
+Server deployment and one-time migration tools belong to the server project.
