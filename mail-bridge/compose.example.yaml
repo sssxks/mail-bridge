@@ -1,0 +1,22 @@
+services:
+  mail-bridge:
+    build: .
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      MAIL_BRIDGE_CONFIG: /run/config.json
+      MAIL_BRIDGE_PASSWORD: ${MAIL_BRIDGE_PASSWORD:?Enter locally}
+      MAIL_BRIDGE_HTTP_TOKEN: ${MAIL_BRIDGE_HTTP_TOKEN:?Enter locally}
+      MAIL_BRIDGE_PUBLIC_URL: ${MAIL_BRIDGE_PUBLIC_URL:?Set HTTPS origin}
+      MAIL_BRIDGE_OAUTH_REDIRECT_URIS: ${MAIL_BRIDGE_OAUTH_REDIRECT_URIS:-["https://chatgpt.com/connector_platform_oauth_redirect"]}
+    volumes:
+      - ${MAIL_BRIDGE_CONFIG:?External config path}:/run/config.json:ro
+      - mail-journal:/data
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+volumes:
+  mail-journal:

@@ -1,0 +1,46 @@
+[package]
+name = "mail-bridge-rust"
+version = "0.3.0"
+edition = "2024"
+rust-version = "1.88"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt", "net", "time", "sync", "io-util", "signal"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tower = { version = "0.5", features = ["util", "limit"] }
+tower-http = { version = "0.6", features = ["limit", "timeout"] }
+rmcp = { version = "3.5.1", default-features = false, features = ["server", "transport-streamable-http-server"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+futures-util = "0.3"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "1"
+lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls", "ring", "webpki-roots"] }
+mail-parser = { version = "0.11", features = ["full_encoding", "serde"] }
+html2text = "0.16"
+rusqlite = { version = "0.37", features = ["bundled"] }
+oauth2 = { version = "5", default-features = false }
+sha2 = "0.10"
+hmac = "0.12"
+subtle = "2"
+rand = "0.8"
+base64 = "0.22"
+url = "2"
+serde_urlencoded = "0.7"
+html-escape = "0.2"
+zeroize = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "stream"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[dev-dependencies]
+tempfile = "3"
+http-body-util = "0.1"
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

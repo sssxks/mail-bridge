@@ -1,0 +1,33 @@
+services:
+  mail-bridge:
+    # Load this prebuilt image onto the small server. No build step here.
+    image: mail-bridge-rust:0.3.0
+    ports:
+      - "127.0.0.1:18765:18765"
+    environment:
+      MAIL_BRIDGE_EVENTS_ENABLED: "false"
+      MAIL_BRIDGE_CONFIG: /run/config.json
+      MAIL_BRIDGE_PASSWORDS_DIR: /run/mailboxes
+      MAIL_BRIDGE_OWNER_PASSWORD_FILE: /run/owner_password
+      MAIL_BRIDGE_PUBLIC_URL: ${MAIL_BRIDGE_PUBLIC_URL:?Set your HTTPS origin}
+      MAIL_BRIDGE_OAUTH_REDIRECT_URIS: ${MAIL_BRIDGE_OAUTH_REDIRECT_URIS:-["https://chatgpt.com/connector_platform_oauth_redirect"]}
+    volumes:
+      - ${MAIL_BRIDGE_PRIVATE_DIR:?Private external directory}/config.json:/run/config.json:ro
+      - ${MAIL_BRIDGE_PRIVATE_DIR:?Private external directory}/mailboxes:/run/mailboxes:ro
+      - ${MAIL_BRIDGE_PRIVATE_DIR:?Private external directory}/owner_password:/run/owner_password:ro
+      - journal:/data
+    mem_limit: 160m
+    mem_reservation: 128m
+    pids_limit: 16
+    cpus: 0.75
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+    logging:
+      driver: local
+      options:
+        max-size: "1m"
+        max-file: "2"
+volumes:
+  journal:

@@ -1,0 +1,8 @@
+target
+data
+.env
+config.json
+*password*
+*.sqlite3*
+tests
+.git

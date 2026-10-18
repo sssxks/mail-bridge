@@ -1,0 +1,2 @@
+# Runtime tested with CPython 3.12.14; requires CPython >=3.11.
+# Third-party runtime dependencies: none. Do not pip install anything.
