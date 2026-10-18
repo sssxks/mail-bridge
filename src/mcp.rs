@@ -151,15 +151,29 @@ impl ServerHandler for Mcp {
                     ErrorData::invalid_params("Invalid event subscription arguments", None)
                 })?;
                 if request.method == "events/subscribe" {
-                    events
-                        .subscribe(&owner.0, params)
-                        .await
-                        .map_err(|e| e.rpc())?
+                    let result = events.subscribe(&owner.0, params).await;
+                    match &result {
+                        Ok(_) => crate::events::audit("subscribe", "accepted", "ok"),
+                        Err(error) => crate::events::audit(
+                            "subscribe",
+                            "failed",
+                            error.reason.unwrap_or(match error.code {
+                                -32602 => "invalid_arguments",
+                                -32024 => "access_denied",
+                                -32025 => "resource_limit",
+                                _ => "internal_error",
+                            }),
+                        ),
+                    }
+                    result.map_err(|e| e.rpc())?
                 } else {
-                    events
-                        .unsubscribe(&owner.0, params)
-                        .await
-                        .map_err(|e| e.rpc())?
+                    let result = events.unsubscribe(&owner.0, params).await;
+                    crate::events::audit(
+                        "unsubscribe",
+                        if result.is_ok() { "accepted" } else { "failed" },
+                        "request_completed",
+                    );
+                    result.map_err(|e| e.rpc())?
                 }
             }
             _ => {

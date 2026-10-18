@@ -16,7 +16,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 use zeroize::Zeroizing;
@@ -37,6 +37,7 @@ struct Mail {
     state: Mutex<BTreeMap<String, (u32, u32)>>,
     snapshots: AtomicUsize,
     scans: AtomicUsize,
+    fail_snapshot: AtomicBool,
 }
 impl Mail {
     fn set(&self, a: &str, v: u32, next: u32) {
@@ -50,6 +51,9 @@ impl Source for Mail {
     fn snapshot<'a>(&'a self, f: &'a Filters) -> BoxFuture<'a, Result<Snapshot>> {
         Box::pin(async move {
             self.snapshots.fetch_add(1, Ordering::SeqCst);
+            if self.fail_snapshot.load(Ordering::SeqCst) {
+                return Err(mail_bridge_rust::Error("Missing UIDVALIDITY"));
+            }
             let (validity, next_uid) = self.state.lock().unwrap()[&f.account_id];
             Ok(Snapshot { validity, next_uid })
         })
@@ -501,4 +505,38 @@ async fn zero_subscriptions_means_no_mail_watch() {
     assert_eq!(mail.snapshots.load(Ordering::SeqCst), 0);
     assert_eq!(mail.scans.load(Ordering::SeqCst), 0);
     assert!(receiver.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn two_trigger_task_paces_distinct_callbacks_on_one_platform_host() {
+    let (_dir, _settings, _db, _auth, _mail, receiver, events) = setup();
+    for account in ["qq", "zju"] {
+        let mut subscription = request(account);
+        subscription.delivery.url = format!("https://receiver.example.com/events/{account}");
+        accepted(events.subscribe("owner", subscription).await);
+    }
+    assert_eq!(events.active().unwrap().len(), 2);
+    assert_eq!(receiver.calls.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn failed_baseline_leaves_no_subscription_and_retry_reuses_callback_proof() {
+    let (_dir, _settings, db, _auth, mail, receiver, events) = setup();
+    mail.fail_snapshot.store(true, Ordering::SeqCst);
+    let error = events
+        .subscribe("owner", request("zju"))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.reason, Some("imap_uidvalidity_missing"));
+    assert!(events.active().unwrap().is_empty());
+    assert_eq!(pending(&db), 0);
+    mail.fail_snapshot.store(false, Ordering::SeqCst);
+    let id = accepted(events.subscribe("owner", request("zju")).await)["id"].clone();
+    assert_eq!(events.active().unwrap().len(), 1);
+    assert_eq!(receiver.calls.lock().unwrap().len(), 1);
+    assert_eq!(
+        accepted(events.subscribe("owner", request("zju")).await)["id"],
+        id
+    );
 }

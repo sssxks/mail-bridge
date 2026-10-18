@@ -1243,6 +1243,60 @@ async fn event_scan_fetches_decoded_headers_without_bodies_or_seen_flags() {
 }
 
 #[tokio::test]
+async fn coremail_event_baseline_and_catchup_without_uidnext() {
+    use mail_bridge_rust::events::ImapSource;
+    let missing_next = |exists, validity| {
+        (
+            "EXAMINE".into(),
+            format!(
+                "* {exists} EXISTS\r\n* OK [UIDVALIDITY {validity}] valid\r\n%TAG% OK [READ-ONLY] opened\r\n"
+            ),
+        )
+    };
+    let (mut session, server) = mock_imap(vec![
+        login(),
+        missing_next(3, 7),
+        (
+            " FETCH * (UID)".into(),
+            "* 3 FETCH (UID 4096)\r\n%TAG% OK fetched\r\n".into(),
+        ),
+        missing_next(4, 7),
+        (
+            " FETCH * (UID)".into(),
+            "* 4 FETCH (UID 4100)\r\n%TAG% OK fetched\r\n".into(),
+        ),
+        (
+            "UID SEARCH UID 4097:4100".into(),
+            "* SEARCH 4100\r\n%TAG% OK searched\r\n".into(),
+        ),
+        (
+            "UID FETCH 4100 (UID BODY.PEEK[HEADER]<0.8192>)".into(),
+            "* 4 FETCH (UID 4100 BODY[HEADER]<0> {2}\r\n\r\n)\r\n%TAG% OK fetched\r\n".into(),
+        ),
+        missing_next(0, 8),
+    ])
+    .await;
+    let baseline = ImapSource::snapshot_session(&mut session, "INBOX")
+        .await
+        .unwrap();
+    assert_eq!((baseline.validity, baseline.next_uid), (7, 4097));
+    let catchup = ImapSource::scan_session(&mut session, "INBOX", 7, 4096)
+        .await
+        .unwrap();
+    assert_eq!(
+        catchup.messages.iter().map(|m| m.uid).collect::<Vec<_>>(),
+        vec![4100]
+    );
+    assert_eq!(catchup.scanned_to, 4100);
+    let reset = ImapSource::scan_session(&mut session, "INBOX", 7, 4100)
+        .await
+        .unwrap();
+    assert_eq!((reset.validity, reset.next_uid), (8, 1));
+    assert!(reset.messages.is_empty());
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn event_scan_bounds_header_batches_and_resumes_the_uid_window() {
     use mail_bridge_rust::events::ImapSource;
     let ids = (1..=129)

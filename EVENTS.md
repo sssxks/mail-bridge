@@ -1,5 +1,26 @@
 # MCP Events / message.created (0.3)
 
+## Coremail compatibility and operational diagnostics
+
+Some servers (confirmed on the ZJU account during live read-only diagnosis)
+omit UIDNEXT from both EXAMINE and STATUS. Event baseline and catch-up now fall
+back to one bounded `FETCH * (UID)` on a nonempty mailbox; an empty mailbox starts
+at zero. No historical SEARCH, message body fetch or read-flag mutation is needed
+to establish that watermark. UIDVALIDITY is still required and checked.
+
+Distinct callbacks on the same host are paced by the existing two-second
+verification rate limit, rather than rejected. Signed verification, TLS/DNS
+checks, owner isolation, bounded queues and the two-subscription limit remain.
+Failed baselines create no subscription or outbox entries; a short-lived callback
+proof may remain and is safely reused on retry. Existing OAuth grants stay valid.
+
+The systemd journal now receives `mail_event` records with only UTC timestamp and
+static action/status/reason categories for verification, subscription outcomes,
+queued events and delivery results. No headers, keys, tokens, callback URLs,
+recipients or message content are logged. Baseline errors return a categorized
+`data.reason`. These diagnostics support real platform acceptance testing; mocks
+and catalog discovery alone do not prove delivery to a dot.
+
 Contract verified against https://developers.openai.com/plugins/build/mcp-events
 and its linked experimental MCP Events draft on 2026-10-18. This is an
 implementation of OpenAI's webhook subset, not a claim of live platform approval.

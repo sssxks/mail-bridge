@@ -25,6 +25,13 @@ use tokio_util::sync::CancellationToken;
 const EVENT: &str = "message.created";
 const MAX_SUBS: i64 = 2;
 const MAX_QUEUE: i64 = 128;
+/// Safe operational breadcrumb: callers supply static categories, never payloads.
+pub fn audit(action: &'static str, status: &'static str, reason: &'static str) {
+    eprintln!(
+        "mail_event time={} action={action} status={status} reason={reason}",
+        date(now())
+    );
+}
 pub fn date(seconds: i64) -> String {
     chrono::DateTime::from_timestamp(seconds, 0)
         .expect("bounded timestamp")
@@ -97,6 +104,44 @@ impl ImapSource {
     pub fn new(db: Db) -> Self {
         Self { db }
     }
+    /// Some Coremail servers omit UIDNEXT, including from STATUS. Fetching only
+    /// the last existing UID gives a bounded from-now watermark without bodies.
+    async fn observed_next_uid<
+        T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + std::fmt::Debug + Send,
+    >(
+        session: &mut async_imap::Session<T>,
+        next: Option<u32>,
+        exists: u32,
+    ) -> Result<u32> {
+        if let Some(next) = next.filter(|next| *next > 0) {
+            return Ok(next);
+        }
+        if exists == 0 {
+            return Ok(1);
+        }
+        let mut fetched = session.fetch("*", "(UID)").await.map_err(safe)?;
+        let mut last = None;
+        while let Some(message) = fetched.try_next().await.map_err(safe)? {
+            if let Some(uid) = message.uid.filter(|uid| *uid > 0) {
+                last = Some(last.map_or(uid, |old: u32| old.max(uid)));
+            }
+        }
+        last.ok_or(Error("Mailbox changed while establishing event baseline"))?
+            .checked_add(1)
+            .ok_or(Error("IMAP UID space exhausted"))
+    }
+    /// Establish the no-history baseline using EXAMINE and at most one UID fetch.
+    pub async fn snapshot_session<
+        T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + std::fmt::Debug + Send,
+    >(
+        session: &mut async_imap::Session<T>,
+        mailbox: &str,
+    ) -> Result<Snapshot> {
+        let selected = session.examine(utf7_encode(mailbox)).await.map_err(safe)?;
+        let validity = selected.uid_validity.ok_or(Error("Missing UIDVALIDITY"))?;
+        let next_uid = Self::observed_next_uid(session, selected.uid_next, selected.exists).await?;
+        Ok(Snapshot { validity, next_uid })
+    }
     /// Scan a bounded UID window and fetch at most 128 header summaries.
     /// One SEARCH and one batched PEEK fetch use O(n log n + header bytes),
     /// with n <= 1024 UIDs and at most 8 KiB per fetched header; no body fetches.
@@ -110,7 +155,7 @@ impl ImapSource {
     ) -> Result<Scan> {
         let selected = session.examine(utf7_encode(mailbox)).await.map_err(safe)?;
         let current = selected.uid_validity.ok_or(Error("Missing UIDVALIDITY"))?;
-        let next = selected.uid_next.ok_or(Error("Missing UIDNEXT"))?;
+        let next = Self::observed_next_uid(session, selected.uid_next, selected.exists).await?;
         let end = next.saturating_sub(1).min(uid.saturating_add(1024));
         let mut uids = if current == validity && end > uid {
             session
@@ -175,14 +220,7 @@ impl Source for ImapSource {
     fn snapshot<'a>(&'a self, f: &'a Filters) -> BoxFuture<'a, Result<Snapshot>> {
         Box::pin(async move {
             let mut session = self.account(&f.account_id)?.connect().await?;
-            let selected = session
-                .examine(utf7_encode(&f.mailbox))
-                .await
-                .map_err(safe)?;
-            let snapshot = Snapshot {
-                validity: selected.uid_validity.ok_or(Error("Missing UIDVALIDITY"))?,
-                next_uid: selected.uid_next.ok_or(Error("Missing UIDNEXT"))?,
-            };
+            let snapshot = Self::snapshot_session(&mut session, &f.mailbox).await?;
             let _ = session.logout().await;
             Ok(snapshot)
         })
@@ -385,7 +423,7 @@ impl Events {
             .map_err(EventError::internal)?
             .is_some_and(|expires| expires > now());
         if !cached {
-            {
+            let delay = {
                 let mut attempts = self
                     .attempts
                     .lock()
@@ -397,17 +435,18 @@ impl Events {
                     .host_str()
                     .expect("host")
                     .to_owned();
-                if attempts
-                    .get(&host)
-                    .is_some_and(|time| time.elapsed() < Duration::from_secs(2))
-                {
-                    return Err(EventError::limit());
-                }
+                let delay = attempts.get(&host).map_or(Duration::ZERO, |time| {
+                    Duration::from_secs(2).saturating_sub(time.elapsed())
+                });
                 if attempts.len() > 128 {
                     return Err(EventError::limit());
                 }
-                attempts.insert(host, Instant::now());
-            }
+                attempts.insert(host, Instant::now() + delay);
+                delay
+            };
+            // The subscribe gate serializes these requests. Pace a second valid
+            // callback on the same host instead of failing a two-trigger task.
+            tokio::time::sleep(delay).await;
             let challenge = crate::auth::random();
             let body = serde_json::to_vec(&json!({"type":"verification","challenge":challenge}))
                 .map_err(safe)
@@ -449,6 +488,7 @@ impl Events {
                 )
                 .map_err(safe)
                 .map_err(EventError::internal)?;
+            audit("subscribe", "callback_verified", "ok");
         }
         let snapshot = if old.is_none() {
             Some(
@@ -457,8 +497,8 @@ impl Events {
                     self.source.snapshot(&request.arguments),
                 )
                 .await
-                .map_err(|_| EventError::upstream())?
-                .map_err(|_| EventError::upstream())?,
+                .map_err(|_| EventError::upstream(Error("Event baseline timeout")))?
+                .map_err(EventError::upstream)?,
             )
         } else {
             None
@@ -496,7 +536,9 @@ impl Events {
                 old.truncated,
             )
         } else {
-            let snapshot = snapshot.ok_or_else(EventError::upstream)?;
+            let snapshot = snapshot.ok_or_else(|| {
+                EventError::upstream(Error("Subscription expired during refresh"))
+            })?;
             // An expired identity starts from now; its old pending deliveries
             // must not leak into a newly granted subscription.
             db.execute("DELETE FROM event_outbox WHERE sub=?", [&id])
@@ -630,6 +672,9 @@ impl Events {
         )
         .map_err(safe)?;
         tx.commit().map_err(safe)?;
+        if !messages.is_empty() && available > 0 {
+            audit("scan", "queued", "new_uid");
+        }
         Ok(())
     }
     pub async fn deliver_once(&self, id: &str) -> Result<bool> {
@@ -664,6 +709,7 @@ impl Events {
             Ok(reply) if (200..300).contains(&reply.status) => (true, false, ""),
             Ok(reply) if reply.status == 410 => {
                 self.remove(id)?;
+                audit("deliver", "removed", "http_410");
                 return Ok(false);
             }
             Ok(reply) if reply.status == 413 => (false, false, "http_4xx"),
@@ -678,6 +724,7 @@ impl Events {
                 params![id, event],
             )
             .map_err(safe)?;
+            audit("deliver", "accepted", "http_2xx");
         } else {
             let count = if retry { attempts + 1 } else { 5 };
             let backoff = [1, 4, 16, 60, 300][attempts.min(4) as usize];
@@ -687,12 +734,14 @@ impl Events {
                     params![id, event],
                 )
                 .map_err(safe)?;
+                audit("deliver", "paused", reason);
                 db.execute(
                     "UPDATE event_subscriptions SET last_error=?,truncated=1,paused=1 WHERE id=?",
                     params![reason, id],
                 )
                 .map_err(safe)?;
             } else {
+                audit("deliver", "retry", reason);
                 db.execute(
                     "UPDATE event_outbox SET attempts=?,next_attempt=? WHERE sub=? AND event=?",
                     params![count, now() + backoff, id, event],
@@ -827,11 +876,19 @@ impl EventError {
             reason: None,
         }
     }
-    fn upstream() -> Self {
+    fn upstream(error: Error) -> Self {
         Self {
             code: -32603,
-            message: "Could not establish mailbox baseline",
-            reason: None,
+            message: "Could not establish mailbox baseline; existing OAuth remains valid. Retry the subscription after resolving the IMAP error.",
+            reason: Some(match error.0 {
+                "Missing UIDVALIDITY" => "imap_uidvalidity_missing",
+                "Mailbox changed while establishing event baseline" => "imap_mailbox_changed",
+                "IMAP UID space exhausted" => "imap_uid_exhausted",
+                "Event baseline timeout" => "imap_baseline_timeout",
+                "Subscription expired during refresh" => "subscription_expired",
+                "IMAP authentication failed; details suppressed" => "imap_authentication_failed",
+                _ => "imap_baseline_failed",
+            }),
         }
     }
     // The OpenAI integration documents -32015; the linked draft currently
