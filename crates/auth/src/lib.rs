@@ -293,9 +293,6 @@ impl Auth {
             json!({"access_token":access,"token_type":"Bearer","expires_in":3600,"refresh_token":refresh,"scope":scope}),
         )
     }
-    pub fn token_scopes(&self, token: &str) -> Result<Option<Vec<String>>> {
-        Ok(self.token_access(token)?.map(|(_, scopes)| scopes))
-    }
     pub fn token_access(&self, token: &str) -> Result<Option<(String, Vec<String>)>> {
         Ok(self
             .db
