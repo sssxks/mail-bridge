@@ -7,7 +7,7 @@
 use mail_bridge_auth::{Auth, Params, val};
 use mail_bridge_core::random;
 use mail_bridge_core::{Error, Result, safe};
-use mail_bridge_mail::MailService;
+use mail_bridge_mail::service::MailService;
 use mail_bridge_store::{hash, now};
 use serde_json::{Value, json};
 use std::sync::Mutex;

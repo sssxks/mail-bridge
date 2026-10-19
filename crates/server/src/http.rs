@@ -13,7 +13,7 @@ use axum::{
     routing::{get, post},
 };
 use mail_bridge_auth::Auth;
-use mail_bridge_mail::MailService;
+use mail_bridge_mail::service::MailService;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::never::NeverSessionManager,
 };

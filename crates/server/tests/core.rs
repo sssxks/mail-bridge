@@ -11,10 +11,12 @@ use mail_bridge_core::{
     account::{Config, Security},
 };
 use mail_bridge_mail::{
-    Backend, MailAccount, MailService, RealBackend,
+    backend::{Backend, RealBackend},
     bounded_io::GuardIo,
+    imap::{search, utf7_decode, utf7_encode},
+    mime::parse_mail,
     page::{Page, SearchCriteria},
-    parse_mail, search, utf7_decode, utf7_encode,
+    service::{MailAccount, MailService},
 };
 use mail_bridge_rust::{config::Settings, http::router};
 use mail_bridge_store::{Db, hash};
@@ -147,7 +149,7 @@ async fn concurrent_reads_are_bounded_and_other_accounts_make_progress() {
     let (_dir, _, _, _, original) = setup();
     let mut service = (*original).clone();
     service.gate = Arc::new(tokio::sync::Semaphore::new(
-        mail_bridge_mail::MAIL_CONCURRENCY,
+        mail_bridge_mail::service::MAIL_CONCURRENCY,
     ));
     let (backend, mut started) = slow_backend();
     {
@@ -1314,7 +1316,7 @@ async fn two_account_sender_and_request_id_isolation() {
 
 #[tokio::test]
 async fn event_scan_fetches_decoded_headers_without_bodies_or_seen_flags() {
-    use mail_bridge_events::ImapSource;
+    use mail_bridge_events::source::ImapSource;
     let raw = "Subject: =?utf-8?b?5Lit5paH?=\r\nFrom: =?utf-8?b?5Lit5paH?= <sender@example.com>\r\nDate: Mon, 19 Oct 2026 12:00:00 +0800\r\n\r\n";
     let (mut session, server) = mock_imap(vec![
         login(),
@@ -1357,7 +1359,7 @@ async fn event_scan_fetches_decoded_headers_without_bodies_or_seen_flags() {
 
 #[tokio::test]
 async fn coremail_event_baseline_and_catchup_without_uidnext() {
-    use mail_bridge_events::ImapSource;
+    use mail_bridge_events::source::ImapSource;
     let missing_next = |exists, validity| {
         (
             "EXAMINE".into(),
@@ -1411,7 +1413,7 @@ async fn coremail_event_baseline_and_catchup_without_uidnext() {
 
 #[tokio::test]
 async fn event_scan_bounds_header_batches_and_resumes_the_uid_window() {
-    use mail_bridge_events::ImapSource;
+    use mail_bridge_events::source::ImapSource;
     let ids = (1..=129)
         .map(|id| id.to_string())
         .collect::<Vec<_>>()

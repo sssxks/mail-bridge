@@ -83,14 +83,14 @@ fn render_part(mail: &Message<'_>, inline: &HashSet<u32>, id: u32, depth: usize)
             Ok(body)
         }
         PartType::Text(text) if inline.contains(&id) => Ok(Body {
-            text: crate::clipped(text, 20001),
+            text: mail_bridge_core::clipped(text, 20001),
             sources: 1,
         }),
         PartType::Html(html) if inline.contains(&id) => {
             let text = html2text::from_read(html.as_bytes(), 100)
                 .map_err(|_| Error("HTML body rendering failed; use your mail client"))?;
             Ok(Body {
-                text: crate::clipped(&text, 20001),
+                text: mail_bridge_core::clipped(&text, 20001),
                 sources: 2,
             })
         }

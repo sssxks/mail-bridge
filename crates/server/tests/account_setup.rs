@@ -6,7 +6,7 @@ use axum::{
 use http_body_util::BodyExt;
 use mail_bridge_auth::{Auth, Params};
 use mail_bridge_core::account::AccountSettings;
-use mail_bridge_mail::MailService;
+use mail_bridge_mail::service::MailService;
 use mail_bridge_rust::account_setup::AccountSetup;
 use mail_bridge_rust::{config::Settings, http::router};
 use mail_bridge_store::{Db, hash, now};
@@ -414,7 +414,10 @@ fn invalid_configuration_and_plaintext_tls_are_rejected() {
 
 #[test]
 fn event_source_and_catalog_see_new_accounts_without_starting_watchers() {
-    use mail_bridge_events::{Events, ImapSource, Source};
+    use mail_bridge_events::{
+        Events,
+        source::{ImapSource, Source},
+    };
     let (_dir, _settings, db, auth, mail) = fixture();
     let source = Arc::new(ImapSource::new(db.clone()));
     let events = Events::new(

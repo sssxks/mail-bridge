@@ -1,5 +1,5 @@
 use mail_bridge_auth::Auth;
-use mail_bridge_mail::MailService;
+use mail_bridge_mail::service::MailService;
 use rmcp::{ErrorData, RoleServer, ServerHandler, model::*, service::RequestContext};
 use serde_json::{Value, json};
 use std::sync::{Arc, LazyLock};
@@ -148,8 +148,8 @@ impl ServerHandler for Mcp {
                 if let Some(object) = p.as_object_mut() {
                     object.remove("_meta");
                 }
-                let params: mail_bridge_events::Subscribe =
-                    serde_json::from_value(p).map_err(|_| {
+                let params: mail_bridge_events::subscription::Subscribe = serde_json::from_value(p)
+                    .map_err(|_| {
                         ErrorData::invalid_params("Invalid event subscription arguments", None)
                     })?;
                 if request.method == "events/subscribe" {
@@ -253,7 +253,7 @@ impl ServerHandler for Mcp {
     }
 }
 
-fn event_rpc(error: mail_bridge_events::EventError) -> ErrorData {
+fn event_rpc(error: mail_bridge_events::subscription::EventError) -> ErrorData {
     ErrorData::new(
         ErrorCode(error.code),
         error.message,

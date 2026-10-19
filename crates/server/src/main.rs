@@ -1,5 +1,5 @@
 use mail_bridge_auth::Auth;
-use mail_bridge_mail::MailService;
+use mail_bridge_mail::service::MailService;
 use mail_bridge_rust::{
     config::Settings,
     http::{LimitedListener, router_with_events},
@@ -69,7 +69,7 @@ fn run() -> mail_bridge_core::Result<()> {
             Some(Arc::new(mail_bridge_events::Events::new(
                 db.clone(),
                 auth.clone(),
-                Arc::new(mail_bridge_events::ImapSource::new(db.clone())),
+                Arc::new(mail_bridge_events::source::ImapSource::new(db.clone())),
                 Arc::new(mail_bridge_events::webhook::HttpsTransport),
                 vec![],
             )?))

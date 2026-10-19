@@ -1028,7 +1028,6 @@ dependencies = [
  "mail-bridge-core",
  "mail-bridge-store",
  "oauth2",
- "rand 0.8.8",
  "serde_json",
  "sha2",
  "subtle",
@@ -1062,13 +1061,16 @@ dependencies = [
  "mail-bridge-store",
  "mail-parser",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
  "subtle",
+ "tempfile",
  "tokio",
  "tokio-util",
  "url",
+ "zeroize",
 ]
 
 [[package]]

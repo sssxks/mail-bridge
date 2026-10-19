@@ -1,6 +1,6 @@
 //! Synthetic fixtures only: no personal mail, addresses, invitation codes or URLs.
 use base64::{Engine, engine::general_purpose::STANDARD};
-use mail_bridge_mail::parse_mail;
+use mail_bridge_mail::mime::parse_mail;
 
 fn alternative(plain: &str, html: &str) -> String {
     // Encode UTF-8 as quoted-printable, with bounded physical line lengths.

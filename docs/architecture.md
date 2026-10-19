@@ -25,6 +25,12 @@ and publishes an account only after a successful database write. Protocol DTOs a
 MCP error conversion live with their adapters. Database records do not depend on
 OAuth, HTTP, MCP or event service types.
 
+The mail library exposes `backend`, `imap`, `mime`, `page` and `service` modules;
+SMTP submission and draft construction remain internal. The events library exposes
+`source`, `subscription`, `message` and `webhook`, with worker scheduling kept internal.
+Callers import types from their owning modules directly; there is no compatibility
+facade for the former monolithic library.
+
 Run all Rust tests and lint checks from the repository root:
 
 ```bash
@@ -36,3 +42,6 @@ cargo build --locked --release
 Use `cargo test -p mail-bridge-mail --locked` for mail-specific tests. Cross-crate
 HTTP/MCP and account setup regressions run under the server crate. Browser OAuth
 and offline migration checks retain their root-level commands documented in the README.
+Event lifecycle tests run with `cargo test -p mail-bridge-events --locked`. Their
+synthetic source and webhook receiver are shared with the server's event protocol
+test through `crates/events/tests/support`; they do not introduce production dependencies.

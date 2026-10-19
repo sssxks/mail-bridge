@@ -26,7 +26,7 @@ url.workspace = true
 tempfile.workspace = true
 http-body-util.workspace = true
 futures-util.workspace = true
-lettre.workspace = true
+lettre = { workspace = true, features = ["builder"] }
 base64.workspace = true
 hmac.workspace = true
 sha2.workspace = true
