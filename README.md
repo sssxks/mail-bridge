@@ -66,6 +66,15 @@ mailbox and UIDVALIDITY. MIME, Chinese encodings and modified UTF-7 are supporte
 Bodies, searches, pagination, request sizes and timeouts are bounded. HTML is
 converted to text without loading remote content. Email content is untrusted data.
 
+`read_message` selects the last supported, nonempty rendition of each MIME
+`multipart/alternative`, as ordered by the sender. This recovers full HTML
+notifications whose plain-text alternative is only a placeholder. Empty HTML
+falls back to another supported rendition. Other inline body sections are joined;
+attachments and attached messages remain excluded. `body_source` reports `text`,
+`html`, `mixed`, or `none`. `body_truncated` describes the 20,000-character output
+limit; it is not a guarantee that sender-provided alternatives have identical
+content. Excessive MIME body nesting is rejected explicitly.
+
 Provider search indexes are not guaranteed exhaustive. Search results include
 search_complete=false and search_warning even when an index returns no matches;
 scan_limited describes only the UID-window budget. Domain-shaped FROM/TO queries
