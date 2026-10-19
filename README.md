@@ -146,6 +146,9 @@ eight accounts, two event subscriptions, 128 queued events per subscription;
 64 KiB MCP request, 16 KiB private/OAuth form, 2 MiB mail/literal and 4 MiB IMAP input.
 The supplied service memory cap is 160 MiB.
 
+See [live RSS/PSS composition and optimization priorities](deploy/MEMORY.md)
+for the measured resident footprint and a repeatable Linux sampler.
+
 Ordinary mail operations share a global budget of four, with separate per-account
 budgets of two IMAP reads and one SMTP send. Independent accounts can progress in
 parallel. Account permits are acquired before global permits so a saturated account
