@@ -1019,38 +1019,119 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
+name = "mail-bridge-auth"
+version = "0.4.0"
+dependencies = [
+ "base64 0.22.1",
+ "hmac",
+ "html-escape",
+ "mail-bridge-core",
+ "mail-bridge-store",
+ "oauth2",
+ "rand 0.8.8",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "url",
+ "zeroize",
+]
+
+[[package]]
+name = "mail-bridge-core"
+version = "0.4.0"
+dependencies = [
+ "base64 0.22.1",
+ "lettre",
+ "rand 0.8.8",
+ "serde",
+ "zeroize",
+]
+
+[[package]]
+name = "mail-bridge-events"
+version = "0.4.0"
+dependencies = [
+ "async-imap",
+ "base64 0.22.1",
+ "chrono",
+ "futures-util",
+ "hmac",
+ "mail-bridge-auth",
+ "mail-bridge-core",
+ "mail-bridge-mail",
+ "mail-bridge-store",
+ "mail-parser",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tokio",
+ "tokio-util",
+ "url",
+]
+
+[[package]]
+name = "mail-bridge-mail"
+version = "0.4.0"
+dependencies = [
+ "async-imap",
+ "base64 0.22.1",
+ "futures-util",
+ "html2text",
+ "lettre",
+ "mail-bridge-core",
+ "mail-bridge-store",
+ "mail-parser",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "webpki-roots",
+]
+
+[[package]]
 name = "mail-bridge-rust"
 version = "0.4.0"
 dependencies = [
  "async-imap",
  "axum",
  "base64 0.22.1",
- "chrono",
  "futures-util",
  "hmac",
  "html-escape",
- "html2text",
  "http-body-util",
  "lettre",
- "mail-parser",
+ "mail-bridge-auth",
+ "mail-bridge-core",
+ "mail-bridge-events",
+ "mail-bridge-mail",
+ "mail-bridge-store",
  "oauth2",
- "rand 0.8.8",
- "reqwest",
  "rmcp",
  "rusqlite",
- "serde",
  "serde_json",
  "serde_urlencoded",
  "sha2",
- "subtle",
  "tempfile",
  "tokio",
- "tokio-rustls",
  "tokio-util",
  "tower",
  "tower-http",
  "url",
- "webpki-roots",
+ "zeroize",
+]
+
+[[package]]
+name = "mail-bridge-store"
+version = "0.4.0"
+dependencies = [
+ "mail-bridge-core",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+ "subtle",
  "zeroize",
 ]
 

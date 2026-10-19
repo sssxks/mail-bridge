@@ -2,7 +2,7 @@
 FROM rust:1.98.1-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
-COPY src ./src
+COPY crates ./crates
 RUN cargo build --locked --release && mkdir /out && cp target/release/mail-bridge-rust /out/
 
 # Export a Debian 12 x86_64 executable with buildx --target binary --output.

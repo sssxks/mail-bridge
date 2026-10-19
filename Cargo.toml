@@ -1,10 +1,14 @@
-[package]
-name = "mail-bridge-rust"
+[workspace]
+members = ["crates/core", "crates/store", "crates/mail", "crates/auth", "crates/events", "crates/server"]
+default-members = ["crates/server"]
+resolver = "3"
+
+[workspace.package]
 version = "0.4.0"
 edition = "2024"
 rust-version = "1.88"
 
-[dependencies]
+[workspace.dependencies]
 axum = "0.8"
 tokio = { version = "1", features = ["macros", "rt", "net", "time", "sync", "io-util", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -34,10 +38,13 @@ zeroize = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "stream"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
-[dev-dependencies]
-tokio = { version = "1", features = ["test-util"] }
 tempfile = "3"
 http-body-util = "0.1"
+mail-bridge-core = { path = "crates/core" }
+mail-bridge-store = { path = "crates/store" }
+mail-bridge-mail = { path = "crates/mail" }
+mail-bridge-auth = { path = "crates/auth" }
+mail-bridge-events = { path = "crates/events" }
 
 [profile.release]
 opt-level = "z"

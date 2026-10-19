@@ -53,7 +53,7 @@ such as file_mapped into file, or slab into kernel.
    isolated release builds with the same workload. A smaller binary is not proof
    of lower RSS: only touched pages count. Preserve Chinese charset decoding,
    HTML conversion, TLS and event functionality unless a change is intentional.
-2. For load peaks, profile full MIME parsing in `src/mail.rs::parse_mail`. It
+2. For load peaks, profile full MIME parsing in `crates/mail/src/lib.rs::parse_mail`. It
    obtains an owned body before clipping to 20,000 characters, while the full
    message is still available. Borrowing a decoded text body until clipping may
    avoid one large transient copy. MIME decoding and HTML processing still need

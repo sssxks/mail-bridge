@@ -106,9 +106,13 @@ Existing migrated SMTP flags are preserved; new accounts start disabled.
 ## Build, test and deploy
 
 ```bash
-cargo test --locked
+cargo test --workspace --locked
 cargo build --locked --release
 ```
+
+The Cargo workspace has six crates. See [crate boundaries and development](docs/architecture.md)
+for responsibilities, dependency direction and focused test commands. The server
+remains the default workspace member and its executable is `mail-bridge-rust`.
 
 Browser and migration regression from the repository root:
 
