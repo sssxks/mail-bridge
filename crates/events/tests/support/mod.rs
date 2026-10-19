@@ -40,6 +40,7 @@ pub struct Mail {
     pub snapshots: AtomicUsize,
     pub scans: AtomicUsize,
     pub fail_snapshot: AtomicBool,
+    pub fail_available: AtomicBool,
 }
 impl Mail {
     pub fn set(&self, a: &str, v: u32, next: u32) {
@@ -47,8 +48,11 @@ impl Mail {
     }
 }
 impl Source for Mail {
-    fn available(&self, a: &str) -> bool {
-        self.state.lock().unwrap().contains_key(a)
+    fn available(&self, a: &str) -> Result<bool> {
+        if self.fail_available.load(Ordering::SeqCst) {
+            return Err(mail_bridge_core::Error("Synthetic source lookup failure"));
+        }
+        Ok(self.state.lock().unwrap().contains_key(a))
     }
     fn snapshot<'a>(&'a self, f: &'a Filters) -> BoxFuture<'a, Result<Snapshot>> {
         Box::pin(async move {

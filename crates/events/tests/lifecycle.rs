@@ -17,6 +17,36 @@ fn pending(db: &Db) -> i64 {
 }
 
 #[tokio::test]
+async fn lookup_errors_preserve_subscriptions_and_pending_events() {
+    for fail_storage in [false, true] {
+        let (_dir, _settings, db, _auth, mail, _receiver, events) = setup();
+        let id = accepted(events.subscribe("owner", request("qq")).await)["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        mail.set("qq", 1, 102);
+        events.scan_once(&id).await.unwrap();
+        assert_eq!(pending(&db), 1);
+        if fail_storage {
+            connection(&db).execute("DROP TABLE tokens", []).unwrap();
+        } else {
+            mail.fail_available.store(true, Ordering::SeqCst);
+        }
+        assert!(events.scan_once(&id).await.is_err());
+        assert!(events.get(&id).unwrap().is_some());
+
+        // Run one supervisor iteration before stopping its periodic loop.
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        events.clone().start(shutdown.clone());
+        tokio::task::yield_now().await;
+        shutdown.cancel();
+        tokio::task::yield_now().await;
+        assert!(events.get(&id).unwrap().is_some());
+        assert_eq!(pending(&db), 1);
+    }
+}
+
+#[tokio::test]
 async fn from_now_restart_signed_retry_and_account_isolation() {
     let (_dir, _settings, db, auth, mail, receiver, events) = setup();
     let qq = accepted(events.subscribe("owner", request("qq")).await)["id"]

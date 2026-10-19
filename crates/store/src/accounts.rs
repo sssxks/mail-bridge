@@ -8,6 +8,19 @@ use mail_bridge_core::{
 use rusqlite::params;
 
 impl Db {
+    /// Check account identity without loading configuration or credentials.
+    pub fn runtime_account_exists(&self, id: &str) -> Result<bool> {
+        self.0
+            .lock()
+            .map_err(safe)?
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtime_accounts WHERE id=?)",
+                [id],
+                |row| row.get(0),
+            )
+            .map_err(safe)
+    }
+
     pub fn runtime_accounts(&self) -> Result<Vec<AccountSettings>> {
         let db = self.0.lock().map_err(safe)?;
         let mut query = db

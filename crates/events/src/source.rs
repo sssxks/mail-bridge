@@ -18,7 +18,8 @@ pub struct Scan {
     pub scanned_to: u32,
 }
 pub trait Source: Send + Sync {
-    fn available(&self, account: &str) -> bool;
+    /// Distinguish a missing account from a failed availability lookup.
+    fn available(&self, account: &str) -> Result<bool>;
     fn snapshot<'a>(&'a self, filters: &'a Filters) -> BoxFuture<'a, Result<Snapshot>>;
     fn scan<'a>(
         &'a self,
@@ -145,8 +146,8 @@ impl ImapSource {
     }
 }
 impl Source for ImapSource {
-    fn available(&self, id: &str) -> bool {
-        self.account(id).is_ok()
+    fn available(&self, id: &str) -> Result<bool> {
+        self.db.runtime_account_exists(id)
     }
     fn snapshot<'a>(&'a self, f: &'a Filters) -> BoxFuture<'a, Result<Snapshot>> {
         Box::pin(async move {

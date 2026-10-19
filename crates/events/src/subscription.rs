@@ -144,7 +144,10 @@ impl Events {
             .auth
             .event_grant_active(owner)
             .map_err(EventError::internal)?
-            || !self.source.available(&request.arguments.account_id)
+            || !self
+                .source
+                .available(&request.arguments.account_id)
+                .map_err(EventError::internal)?
         {
             return Err(EventError::forbidden());
         }

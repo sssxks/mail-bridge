@@ -428,13 +428,13 @@ fn event_source_and_catalog_see_new_accounts_without_starting_watchers() {
         vec![],
     )
     .unwrap();
-    assert!(!source.available("work"));
+    assert!(!source.available("work").unwrap());
     assert_eq!(
         events.catalog()["events"][0]["inputSchema"]["properties"]["account_id"]["enum"],
         json!([])
     );
     mail.add_account(account("work")).unwrap();
-    assert!(source.available("work"));
+    assert!(source.available("work").unwrap());
     assert_eq!(
         events.catalog()["events"][0]["inputSchema"]["properties"]["account_id"]["enum"],
         json!(["work"])

@@ -19,6 +19,9 @@ exchange validates and consumes the grant and issues both tokens in one transact
 the authorization crate supplies a policy callback over a stored record. Event scans
 check the expected cursor, insert bounded outbox entries and advance the cursor in
 one transaction. Delivery acknowledgement/retry updates are also transactional.
+Grant and account availability lookups distinguish absence from storage/source
+errors. A failed lookup leaves subscriptions and pending events intact for retry;
+only confirmed expiry, revocation or account absence triggers their removal.
 
 Account setup decodes HTTP forms in `server`, persists through the mail service,
 and publishes an account only after a successful database write. Protocol DTOs and

@@ -13,7 +13,7 @@ impl Events {
         };
         if sub.expires <= now()
             || !self.auth.event_grant_active(&sub.owner)?
-            || !self.source.available(&sub.filters.account_id)
+            || !self.source.available(&sub.filters.account_id)?
         {
             self.remove(id)?;
             return Ok(());
@@ -119,10 +119,25 @@ impl Events {
             loop {
                 let subscriptions = self.active().unwrap_or_default();
                 for sub in subscriptions {
-                    if sub.expires <= now()
-                        || !self.auth.event_grant_active(&sub.owner).unwrap_or(false)
-                        || !self.source.available(&sub.filters.account_id)
-                    {
+                    let eligible = if sub.expires <= now() {
+                        Ok(false)
+                    } else {
+                        self.auth.event_grant_active(&sub.owner).and_then(|active| {
+                            if active {
+                                self.source.available(&sub.filters.account_id)
+                            } else {
+                                Ok(false)
+                            }
+                        })
+                    };
+                    let eligible = match eligible {
+                        Ok(eligible) => eligible,
+                        Err(_) => {
+                            audit("watch", "retry", "availability_lookup_failed");
+                            continue;
+                        }
+                    };
+                    if !eligible {
                         let _ = self.remove(&sub.id);
                         continue;
                     }
