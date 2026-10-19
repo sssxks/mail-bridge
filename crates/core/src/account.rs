@@ -12,10 +12,12 @@ use zeroize::Zeroizing;
 /// Account identity: `[a-z0-9_-]{1,32}` stored verbatim as immutable UTF-8.
 /// Private encoding excludes empty, oversized and noncanonical identities.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(try_from = "Box<str>", into = "Box<str>")]
+#[serde(try_from = "Box<str>")]
 pub struct Account(Box<str>);
 impl TryFrom<Box<str>> for Account {
+    /// Parse rejection type for a noncanonical account identity.
     type Error = Error;
+    /// Parse the external representation into this type, enforcing its invariants.
     fn try_from(value: Box<str>) -> Result<Self> {
         if value.is_empty()
             || value.len() > 32
@@ -23,23 +25,21 @@ impl TryFrom<Box<str>> for Account {
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
         {
-            return Err(Error("Invalid account ID"));
+            return Err(Error::Rejected("Invalid account ID"));
         }
         Ok(Self(value))
     }
 }
 impl std::str::FromStr for Account {
+    /// Parse rejection type for a noncanonical account identity.
     type Err = Error;
+    /// Parse the canonical textual representation.
     fn from_str(s: &str) -> Result<Self> {
         Box::<str>::from(s).try_into()
     }
 }
-impl From<Account> for Box<str> {
-    fn from(v: Account) -> Self {
-        v.0
-    }
-}
 impl Borrow<str> for Account {
+    /// Borrow the canonical spelling for registry lookup without allocation.
     fn borrow(&self) -> &str {
         &self.0
     }
@@ -83,11 +83,15 @@ pub enum Security {
 /// Private fields exclude malformed labels and zero ports.
 #[derive(Clone)]
 pub struct Endpoint {
+    /// Validated bare DNS hostname, without a URL scheme or port.
     host: Box<str>,
+    /// Nonzero network port.
     port: NonZeroU16,
+    /// Required TLS negotiation mode.
     security: Security,
 }
 impl Endpoint {
+    /// Parse an external representation once before the resulting value enters business code.
     fn parse(host: Box<str>, port: u16, security: Security) -> Result<Self> {
         if host.len() > 253
             || host.split('.').any(|part| {
@@ -98,11 +102,11 @@ impl Endpoint {
                     || !part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
             })
         {
-            return Err(Error("Use a bare DNS mail hostname"));
+            return Err(Error::Rejected("Use a bare DNS mail hostname"));
         }
         Ok(Self {
             host,
-            port: NonZeroU16::new(port).ok_or(Error("Invalid port"))?,
+            port: NonZeroU16::new(port).ok_or(Error::Rejected("Invalid port"))?,
             security,
         })
     }
@@ -126,8 +130,11 @@ impl Endpoint {
 /// Configured endpoints always contain a nonzero port and valid hostname.
 #[derive(Clone)]
 enum Smtp {
+    /// No submission endpoint; retain the external TLS preference for legacy serialization.
     Unconfigured(Security),
+    /// A configured valid endpoint with SMTP submission disabled.
     Disabled(Endpoint),
+    /// A configured valid endpoint with SMTP submission explicitly enabled.
     Enabled(Endpoint),
 }
 
@@ -135,14 +142,23 @@ enum Smtp {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawConfig {
+    /// Mailbox authentication username.
     pub username: Box<str>,
+    /// Sender address used for previews, fingerprints and SMTP construction.
     pub from_address: Box<str>,
+    /// External IMAP hostname, parsed into an endpoint before use.
     pub imap_host: Box<str>,
+    /// External IMAP port; parsing rejects zero.
     pub imap_port: u16,
+    /// Required IMAP TLS or STARTTLS mode.
     pub imap_security: Security,
+    /// External SMTP hostname; empty denotes an unconfigured sender.
     pub smtp_host: Box<str>,
+    /// External SMTP port; a configured endpoint requires a nonzero value.
     pub smtp_port: u16,
+    /// Required SMTP TLS or STARTTLS mode.
     pub smtp_security: Security,
+    /// Explicit permission to submit mail from this account.
     #[serde(default)]
     pub smtp_enabled: bool,
 }
@@ -152,20 +168,26 @@ pub struct RawConfig {
 #[derive(Clone, Deserialize)]
 #[serde(try_from = "RawConfig")]
 pub struct Config {
+    /// Mailbox authentication username.
     username: Box<str>,
+    /// Sender address used for previews, fingerprints and SMTP construction.
     from_address: lettre::Address,
+    /// Configured read endpoint or its independent concurrency budget.
     imap: Endpoint,
+    /// Submission state or its independent concurrency budget.
     smtp: Smtp,
 }
 impl TryFrom<RawConfig> for Config {
+    /// Parse rejection type for invalid endpoint or sender configuration.
     type Error = Error;
+    /// Parse the external representation into this type, enforcing its invariants.
     fn try_from(raw: RawConfig) -> Result<Self> {
         clean(&raw.username, 254)?;
         let from_address = crate::address(&raw.from_address)?;
         let imap = Endpoint::parse(raw.imap_host, raw.imap_port, raw.imap_security)?;
         let smtp = if raw.smtp_host.is_empty() {
             if raw.smtp_enabled {
-                return Err(Error("Invalid port"));
+                return Err(Error::Rejected("Invalid port"));
             }
             Smtp::Unconfigured(raw.smtp_security)
         } else {
@@ -219,6 +241,7 @@ impl Config {
     }
 }
 impl Serialize for Config {
+    /// Encode the existing external representation without changing its field semantics.
     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let mut out = serializer.serialize_struct("Config", 9)?;
@@ -256,7 +279,7 @@ impl MailboxCredential {
     /// Consume a temporary secret, erasing it even when parsing fails.
     pub fn parse(password: Zeroizing<String>) -> Result<Self> {
         if password.is_empty() || password.len() > 1024 || password.contains(['\r', '\n', '\0']) {
-            return Err(Error("Invalid mailbox credential"));
+            return Err(Error::Rejected("Invalid mailbox credential"));
         }
         Ok(Self(Arc::new(Zeroizing::new(password.as_str().into()))))
     }
@@ -297,8 +320,58 @@ mod credential_tests {
 /// Each component enforces its own constraints; no whole-account revalidation is needed.
 #[derive(Clone)]
 pub struct AccountSettings {
+    /// Stable identity of this account, subscription or queued event.
     pub id: Account,
+    /// Parsed immutable account display name.
     pub name: AccountName,
+    /// Shared immutable parsed mailbox configuration.
     pub config: Arc<Config>,
+    /// Parsed zeroizing mailbox credential; never exposed through serialization.
     pub password: MailboxCredential,
+}
+
+/// Mailbox name: nonblank text of at most 512 Unicode characters, excluding CR/LF/NUL.
+/// Private immutable storage preserves the original spelling for modified UTF-7 encoding.
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[serde(try_from = "Box<str>")]
+pub struct Mailbox(Box<str>);
+impl TryFrom<Box<str>> for Mailbox {
+    /// Parse rejection for an empty, oversized or control-containing mailbox.
+    type Error = Error;
+    /// Parse the original mailbox spelling once.
+    fn try_from(value: Box<str>) -> Result<Self> {
+        clean(&value, 512)?;
+        Ok(Self(value))
+    }
+}
+impl std::str::FromStr for Mailbox {
+    /// Parse rejection for invalid mailbox text.
+    type Err = Error;
+    /// Copy and parse an external mailbox spelling.
+    fn from_str(value: &str) -> Result<Self> {
+        Box::<str>::from(value).try_into()
+    }
+}
+impl Mailbox {
+    /// Borrow the original mailbox spelling.
+    #[inline(always)]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl std::ops::Deref for Mailbox {
+    /// Borrowed mailbox text.
+    type Target = str;
+    /// Borrow without allocating or revalidating.
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+impl std::ops::Deref for Account {
+    /// Borrowed canonical account spelling.
+    type Target = str;
+    /// Borrow without allocating or revalidating.
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
 }

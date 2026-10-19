@@ -15,4 +15,3 @@ sha2.workspace = true
 subtle.workspace = true
 zeroize.workspace = true
 url.workspace = true
-html-escape.workspace = true

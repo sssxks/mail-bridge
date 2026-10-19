@@ -2,13 +2,14 @@ use mail_bridge_auth::Auth;
 use mail_bridge_mail::service::MailService;
 use mail_bridge_rust::{
     config::Settings,
-    http::{LimitedListener, router_with_events},
+    http::{LimitedListener, router},
 };
 use mail_bridge_store::Db;
 use std::{future::IntoFuture, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 // systemd and Docker send SIGTERM; interactive terminals send Ctrl+C.
+/// Wait for Ctrl+C or the platform termination signal.
 async fn shutdown_signal() -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -23,6 +24,7 @@ async fn shutdown_signal() -> std::io::Result<()> {
     tokio::signal::ctrl_c().await
 }
 
+/// Cancel workers and drain HTTP requests under one explicit shutdown deadline.
 async fn serve_until_shutdown(
     server: impl Future<Output = std::io::Result<()>>,
     signal: impl Future<Output = std::io::Result<()>>,
@@ -35,12 +37,12 @@ async fn serve_until_shutdown(
         signal = signal => {
             shutdown.cancel();
             if signal.is_err() {
-                Err(mail_bridge_core::Error("Shutdown signal handler failed"))
+                Err(mail_bridge_core::Error::Rejected("Shutdown signal handler failed"))
             } else {
                 println!("Shutdown requested; draining HTTP requests.");
                 match tokio::time::timeout(grace, server).await {
                     Ok(result) => result.map_err(mail_bridge_core::safe),
-                    Err(_) => Err(mail_bridge_core::Error("HTTP shutdown deadline exceeded; inspect send journal before retrying sends")),
+                    Err(_) => Err(mail_bridge_core::Error::Rejected("HTTP shutdown deadline exceeded; inspect send journal before retrying sends")),
                 }
             }
         }
@@ -48,12 +50,14 @@ async fn serve_until_shutdown(
     shutdown.cancel();
     result
 }
+/// Run the process and print only a credential-safe failure before returning a failing exit status.
 fn main() {
     if let Err(error) = run() {
         eprintln!("{}", error);
         std::process::exit(1);
     }
 }
+/// Construct dependencies and start the bounded HTTP service on the current-thread runtime.
 fn run() -> mail_bridge_core::Result<()> {
     let settings = Settings::from_env()?;
     let db = Db::open(&settings.data_dir.join("mail-bridge.sqlite3"))?;
@@ -62,7 +66,7 @@ fn run() -> mail_bridge_core::Result<()> {
         println!("OAuth connections revoked; send journal preserved.");
         return Ok(());
     }
-    let auth = Arc::new(Auth::new(&settings.auth_config(), db.clone()));
+    let auth = Arc::new(Auth::new(&settings.auth_config(), db.clone())?);
     let mail = Arc::new(MailService::from_store(db.clone())?);
     let events =
         if std::env::var("MAIL_BRIDGE_EVENTS_ENABLED").map_or(true, |v| v == "true" || v == "1") {
@@ -85,16 +89,13 @@ fn run() -> mail_bridge_core::Result<()> {
             let listener = tokio::net::TcpListener::bind(settings.bind)
                 .await
                 .map_err(mail_bridge_core::safe)?;
-            let listener = LimitedListener {
-                inner: listener,
-                gate: Arc::new(tokio::sync::Semaphore::new(24)),
-            };
+            let listener = LimitedListener::new(listener, std::num::NonZeroUsize::new(24).expect("positive constant"));
             println!("Mail Bridge Rust: HTTP MCP ready on loopback/configured interface; no mailbox connection until requested.");
             let shutdown = CancellationToken::new();
             if let Some(events) = events.clone() {
                 events.start(shutdown.clone());
             }
-            let server = axum::serve(listener, router_with_events(&settings, auth, mail, events))
+            let server = axum::serve(listener, router( auth, mail, events))
                 .with_graceful_shutdown(shutdown.clone().cancelled_owned())
                 .into_future();
             serve_until_shutdown(server, shutdown_signal(), shutdown, Duration::from_secs(60)).await
@@ -139,7 +140,7 @@ mod tests {
             Duration::ZERO,
         )
         .await;
-        assert!(result.unwrap_err().0.contains("deadline exceeded"));
+        assert!(result.unwrap_err().message().contains("deadline exceeded"));
         assert!(shutdown.is_cancelled());
     }
 

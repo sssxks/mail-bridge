@@ -1,10 +1,19 @@
 //! Single-owner authorization policy; oauth2 supplies PKCE primitives.
 //! Axum owns HTTP parsing, RustCrypto supplies HMAC and constant-time checks.
+//!
+//! | Operation | Frequency | Complexity | Storage | Forbidden implementation |
+//! | --- | --- | --- | --- | --- |
+//! | Parse policy | Startup | O(origin + redirect bytes) | Immutable parsed URLs | Reparse allowlist per request |
+//! | Check consent | Authorization request | O(request + allowlist bytes + SQL) | Typed authorization product | HTML or cookies in this crate |
+//! | Resolve access | Authenticated request | O(log tokens + metadata bytes) | Two-bit scope set | Allocate scope strings |
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
 use mail_bridge_core::random;
+use mail_bridge_core::scope::Scopes;
 use mail_bridge_core::{Error, Result, safe};
-use mail_bridge_store::oauth::{Grant, TokenPair};
+use mail_bridge_store::oauth::{
+    CodeGrant, ExchangeGrant, ExchangeSecret, GrantUse, TokenGrant, TokenPair,
+};
 use mail_bridge_store::{Db, now};
 use oauth2::{PkceCodeChallenge, PkceCodeVerifier};
 use serde_json::{Value, json};
@@ -13,59 +22,60 @@ use std::{collections::BTreeMap, sync::Arc};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
+/// External OAuth/form fields keyed by name; bounded decoding rejects duplicate keys.
 pub type Params = BTreeMap<String, String>;
+/// Compare credential bytes in constant time.
 fn eq(a: &str, b: &str) -> bool {
     bool::from(a.as_bytes().ct_eq(b.as_bytes()))
 }
+/// Borrow a required nonempty request field or reject the external request.
 pub fn val<'a>(params: &'a Params, key: &str) -> Result<&'a str> {
     params
         .get(key)
         .map(String::as_str)
         .filter(|s| !s.is_empty())
-        .ok_or(Error("invalid_request"))
+        .ok_or(Error::Rejected("invalid_request"))
 }
-fn scopes(value: &str) -> Result<String> {
-    let mut v: Vec<&str> = value.split_whitespace().collect();
-    v.sort_unstable();
-    v.dedup();
-    if v.is_empty() || v.iter().any(|s| !matches!(*s, "mail:read" | "mail:send")) {
-        return Err(Error("invalid_scope"));
-    }
-    Ok(v.join(" "))
-}
-
-#[derive(Clone)]
+/// Immutable authorization policy and its store handle.
+///
+/// Semantically `Origin × RedirectPolicies × OwnerCredential × Store`. Construction parses
+/// the origin and callback policies; private fields preserve them for all requests.
 pub struct Auth {
-    pub base: String,
-    pub resource: String,
-    pub redirects: Vec<String>,
-    pub db: Db,
-    owner: Arc<Zeroizing<String>>,
+    /// Canonical public HTTPS origin.
+    origin: url::Url,
+    /// Exact MCP resource bound to this authorization server.
+    resource: Box<str>,
+    /// Explicit callback allowlist; registration must match its policy.
+    redirects: Box<[Redirect]>,
+    /// Shared handle to the private SQLite persistence boundary.
+    db: Db,
+    /// Immutable independent owner credential; never serialized.
+    owner: Arc<Zeroizing<Box<str>>>,
 }
 impl Auth {
+    /// Check the submitted independent owner password without exposing its contents.
     pub fn verify_owner(&self, password: &str) -> bool {
         eq(password, &self.owner)
     }
+    /// Check whether the originating client retains a live read grant for setup.
     pub fn setup_grant_active(&self, client: &str) -> Result<bool> {
-        Ok(self
-            .db
-            .grant_scopes(client, &self.resource, false)?
-            .iter()
-            .any(|scope| scope.split_whitespace().any(|s| s == "mail:read")))
+        self.db
+            .has_read_grant(client, &self.resource, GrantUse::Setup)
     }
+    /// Parse an external callback and apply the configured exact/loopback policy.
     pub fn redirect_allowed(&self, redirect: &str) -> bool {
         let Ok(candidate) = validate_oauth_redirect(redirect) else {
             return false;
         };
+        self.redirect_matches(redirect, &candidate)
+    }
+    /// Apply the pre-parsed callback allowlist to a parsed candidate.
+    fn redirect_matches(&self, redirect: &str, candidate: &url::Url) -> bool {
         self.redirects.iter().any(|allowed| {
-            if allowed == redirect {
+            if allowed.literal.as_ref() == redirect {
                 return true;
             }
-            let Ok(template) = validate_oauth_redirect(allowed) else {
-                return false;
-            };
-            // Port flexibility is opt-in through a portless loopback allowlist
-            // entry. The registered full URI remains exact for this client.
+            let template = &allowed.url;
             template.scheme() == "http"
                 && template.port().is_none()
                 && candidate.scheme() == "http"
@@ -73,41 +83,88 @@ impl Auth {
                 && template.path() == candidate.path()
         })
     }
-    pub fn new(settings: &AuthConfig, db: Db) -> Self {
-        Self {
-            base: settings.public_url.clone(),
-            resource: format!("{}/mcp", settings.public_url),
-            redirects: settings.redirects.clone(),
+    /// Parse immutable authorization policy before constructing the service.
+    pub fn new(settings: &AuthConfig, db: Db) -> Result<Self> {
+        let url = url::Url::parse(&settings.public_url).map_err(safe)?;
+        if url.scheme() != "https"
+            || url.host_str().is_none()
+            || url.path() != "/"
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            return Err(Error::Rejected(
+                "Public URL must be an HTTPS origin without a path or credentials",
+            ));
+        }
+        let base: Box<str> = url.origin().ascii_serialization().into();
+        let redirects = settings
+            .redirects
+            .iter()
+            .map(|literal| {
+                Ok(Redirect {
+                    url: validate_oauth_redirect(literal)?,
+                    literal: literal.clone(),
+                })
+            })
+            .collect::<Result<Box<[_]>>>()?;
+        Ok(Self {
+            resource: format!("{base}/mcp").into(),
+            origin: url,
+            redirects,
             db,
             owner: settings.owner_password.clone(),
-        }
+        })
     }
+    /// Canonical public HTTPS origin.
+    pub fn base(&self) -> &str {
+        self.origin.as_str().trim_end_matches('/')
+    }
+    /// Borrow both accepted host spellings from the parsed origin.
+    /// The constructor guarantees a host, HTTPS and an empty root path.
+    pub fn hosts(&self) -> [&str; 2] {
+        [
+            self.origin
+                .host_str()
+                .expect("authorization origin has a host"),
+            &self.origin[url::Position::BeforeHost..url::Position::AfterPort],
+        ]
+    }
+    /// MCP resource bound to this authorization server.
+    pub fn resource(&self) -> &str {
+        &self.resource
+    }
+    /// Build OAuth authorization-server or protected-resource discovery metadata.
     pub fn metadata(&self, resource: bool) -> Value {
         if resource {
-            json!({"resource":self.resource,"authorization_servers":[self.base],"scopes_supported":["mail:read"]})
+            json!({"resource":self.resource,"authorization_servers":[self.base()],"scopes_supported":["mail:read"]})
         } else {
             // Some native clients request every advertised scope by default.
             // RFC 8414 permits not advertising optional scopes; send/events
             // remain available only when explicitly requested and authorized.
-            json!({"issuer":self.base,"authorization_endpoint":format!("{}/oauth/authorize",self.base),"token_endpoint":format!("{}/oauth/token",self.base),"registration_endpoint":format!("{}/oauth/register",self.base),"response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token"],"token_endpoint_auth_methods_supported":["none"],"code_challenge_methods_supported":["S256"],"scopes_supported":["mail:read"],"authorization_response_iss_parameter_supported":true})
+            json!({"issuer":self.base(),"authorization_endpoint":format!("{}/oauth/authorize",self.base()),"token_endpoint":format!("{}/oauth/token",self.base()),"registration_endpoint":format!("{}/oauth/register",self.base()),"response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token"],"token_endpoint_auth_methods_supported":["none"],"code_challenge_methods_supported":["S256"],"scopes_supported":["mail:read"],"authorization_response_iss_parameter_supported":true})
         }
     }
+    /// Build the Bearer challenge for the requested mail permission.
     pub fn challenge(&self, scope: &str) -> String {
         format!(
             "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource\", scope=\"{}\"",
-            self.base, scope
+            self.base(),
+            scope
         )
     }
+    /// Register a bounded set of policy-approved client callbacks.
     pub fn register(&self, request: Value) -> Result<Value> {
         let uris: Vec<String> = serde_json::from_value(
             request
                 .get("redirect_uris")
                 .cloned()
-                .ok_or(Error("invalid_redirect_uri"))?,
+                .ok_or(Error::Rejected("invalid_redirect_uri"))?,
         )
-        .map_err(|_| Error("invalid_redirect_uri"))?;
+        .map_err(|_| Error::Rejected("invalid_redirect_uri"))?;
         if uris.is_empty() || uris.len() > 5 || uris.iter().any(|uri| !self.redirect_allowed(uri)) {
-            return Err(Error("invalid_redirect_uri"));
+            return Err(Error::Rejected("invalid_redirect_uri"));
         }
         if request
             .get("token_endpoint_auth_method")
@@ -115,7 +172,7 @@ impl Auth {
             .unwrap_or("none")
             != "none"
         {
-            return Err(Error("invalid_client_metadata"));
+            return Err(Error::Rejected("invalid_client_metadata"));
         }
         let id = random();
         self.db.register_client(&id, &uris)?;
@@ -123,8 +180,8 @@ impl Auth {
             json!({"client_id":id,"redirect_uris":uris,"token_endpoint_auth_method":"none","grant_types":["authorization_code","refresh_token"],"response_types":["code"]}),
         )
     }
-    fn checked(&self, params: &Params) -> Result<Params> {
-        let mut checked = Params::new();
+    /// Parse and bind an external request to its registered account/callback policy.
+    fn checked(&self, params: &Params) -> Result<Authorization> {
         for key in [
             "client_id",
             "redirect_uri",
@@ -134,156 +191,167 @@ impl Auth {
             "resource",
             "state",
         ] {
-            let value = val(params, key)?;
-            if value.len() > 2048 {
-                return Err(Error("invalid_request"));
+            if val(params, key)?.len() > 2048 {
+                return Err(Error::Rejected("invalid_request"));
             }
-            checked.insert(key.to_owned(), value.to_owned());
         }
+        let client = val(params, "client_id")?;
+        let redirect = val(params, "redirect_uri")?;
+        let callback = validate_oauth_redirect(redirect)?;
         let redirects = self
             .db
-            .client_redirects(&checked["client_id"])?
-            .ok_or(Error("invalid_client"))?;
-        if !redirects.contains(&checked["redirect_uri"])
-            || !self.redirect_allowed(&checked["redirect_uri"])
-        {
-            return Err(Error("invalid_redirect_uri"));
+            .client_redirects(client)?
+            .ok_or(Error::Rejected("invalid_client"))?;
+        if !redirects.iter().any(|r| r == redirect) || !self.redirect_matches(redirect, &callback) {
+            return Err(Error::Rejected("invalid_redirect_uri"));
         }
-        if checked["resource"] != self.resource {
-            return Err(Error("invalid_target"));
+        if val(params, "resource")? != self.resource() {
+            return Err(Error::Rejected("invalid_target"));
         }
-        if checked["response_type"] != "code"
-            || checked["code_challenge_method"] != "S256"
-            || checked["code_challenge"].len() != 43
-            || !checked["code_challenge"]
+        let challenge = val(params, "code_challenge")?;
+        if val(params, "response_type")? != "code"
+            || val(params, "code_challenge_method")? != "S256"
+            || challenge.len() != 43
+            || !challenge
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
         {
-            return Err(Error("invalid_request"));
+            return Err(Error::Rejected("invalid_request"));
         }
-        checked.insert(
-            "scope".into(),
-            scopes(
+        Ok(Authorization {
+            client: client.into(),
+            redirect: redirect.into(),
+            callback,
+            challenge: challenge.into(),
+            state: val(params, "state")?.into(),
+            scope: Scopes::parse(
                 params
                     .get("scope")
                     .map(String::as_str)
                     .unwrap_or("mail:read"),
             )?,
-        );
-        Ok(checked)
+        })
     }
+    /// Sign canonical authorization fields or exact webhook bytes with the selected key.
     fn signature(&self, params: &Params) -> Result<String> {
         let mut mac = Hmac::<Sha256>::new_from_slice(self.owner.as_bytes()).map_err(safe)?;
         mac.update(&serde_json::to_vec(params).map_err(safe)?);
         Ok(URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
     }
-    pub fn consent_form(&self, params: &Params) -> Result<(String, String)> {
-        let mut params = self.checked(params)?;
-        let csrf = random();
-        params.insert("_csrf".into(), csrf.clone());
+    /// Prepare signed consent fields; HTTP rendering and cookies belong to the host.
+    pub fn consent(&self, params: &Params) -> Result<Consent> {
+        let authorization = self.checked(params)?;
+        let mut params = Params::from([
+            ("client_id".into(), authorization.client.into_string()),
+            ("redirect_uri".into(), authorization.redirect.into_string()),
+            ("response_type".into(), "code".into()),
+            (
+                "code_challenge".into(),
+                authorization.challenge.into_string(),
+            ),
+            ("code_challenge_method".into(), "S256".into()),
+            ("resource".into(), self.resource().to_owned()),
+            ("state".into(), authorization.state.into_string()),
+            ("scope".into(), authorization.scope.as_str().into()),
+        ]);
+        let callback = authorization.callback;
+        let csrf: Box<str> = random().into();
+        params.insert("_csrf".into(), csrf.to_string());
         params.insert("_time".into(), now().to_string());
         params.insert("_sig".into(), self.signature(&params)?);
-        let mut inputs = String::new();
-        for (key, value) in &params {
-            inputs.push_str(&format!(
-                "<input type=\"hidden\" name=\"{}\" value=\"{}\">",
-                html_escape::encode_double_quoted_attribute(key),
-                html_escape::encode_double_quoted_attribute(value)
-            ));
-        }
-        let page = format!(
-            "<!doctype html><meta charset=\"utf-8\"><title>Mail Bridge authorization</title><h1>Authorize Mail Bridge</h1><p>Requested permissions: {}</p><p>Client callback: {}</p><p>Only authorize your own ChatGPT connection. Enter your independent service owner password, never your mailbox authorization code.</p><form method=\"post\" action=\"/oauth/authorize\">{}<label>Owner password <input type=\"password\" name=\"owner_password\" required autocomplete=\"off\"></label><button type=\"submit\">Authorize</button></form>",
-            html_escape::encode_text(&params["scope"]),
-            html_escape::encode_text(&params["redirect_uri"]),
-            inputs
-        );
-        Ok((
-            page,
-            format!("__Host-mail-bridge={csrf}; Secure; HttpOnly; SameSite=Lax; Path=/"),
-        ))
+        Ok(Consent {
+            fields: params,
+            csrf,
+            callback,
+        })
     }
+    /// Verify browser confirmation and owner approval, then issue a short-lived code.
     pub fn authorize(&self, mut params: Params, cookie: &str) -> Result<String> {
         let password = Zeroizing::new(params.remove("owner_password").unwrap_or_default());
         let signature = params.remove("_sig").unwrap_or_default();
         let time = val(&params, "_time")?
             .parse::<i64>()
-            .map_err(|_| Error("invalid_request"))?;
+            .map_err(|_| Error::Rejected("invalid_request"))?;
         if !eq(&signature, &self.signature(&params)?)
             || !eq(val(&params, "_csrf")?, cookie)
             || !(0..=300).contains(&(now() - time))
         {
-            return Err(Error("invalid_request"));
+            return Err(Error::Rejected("invalid_request"));
         }
         if !eq(&password, &self.owner) {
-            return Err(Error("access_denied"));
+            return Err(Error::Rejected("access_denied"));
         }
-        let params = self.checked(&params)?;
+        let authorization = self.checked(&params)?;
         let code = random();
         self.db.save_code(
             &code,
-            &Grant {
-                client: params["client_id"].clone(),
-                redirect: Some(params["redirect_uri"].clone()),
-                challenge: Some(params["code_challenge"].clone()),
-                resource: self.resource.clone(),
-                scope: params["scope"].clone(),
-                expires: now() + 120,
+            &CodeGrant {
+                token: TokenGrant {
+                    client: authorization.client,
+                    resource: self.resource.as_ref().into(),
+                    scope: authorization.scope.as_str().into(),
+                    expires: now() + 120,
+                },
+                redirect: authorization.redirect,
+                challenge: authorization.challenge,
             },
         )?;
-        let mut target = url::Url::parse(&params["redirect_uri"]).map_err(safe)?;
+        let mut target = authorization.callback;
         target
             .query_pairs_mut()
             .append_pair("code", &code)
-            .append_pair("state", &params["state"])
-            .append_pair("iss", &self.base);
+            .append_pair("state", &authorization.state)
+            .append_pair("iss", self.base());
         Ok(target.to_string())
     }
+    /// Apply client, resource and PKCE policy to an atomic one-use grant exchange.
     pub fn exchange(&self, params: &Params) -> Result<Value> {
-        if val(params, "resource")? != self.resource {
-            return Err(Error("invalid_target"));
+        if val(params, "resource")? != self.resource.as_ref() {
+            return Err(Error::Rejected("invalid_target"));
         }
         let client = val(params, "client_id")?;
         let code = match val(params, "grant_type")? {
             "authorization_code" => true,
             "refresh_token" => false,
-            _ => return Err(Error("unsupported_grant_type")),
+            _ => return Err(Error::Rejected("unsupported_grant_type")),
         };
         let secret = val(params, if code { "code" } else { "refresh_token" })?;
         let access = random();
         let refresh = random();
         let scope = self.db.exchange_grant(
-            secret,
-            code,
+            if code {
+                ExchangeSecret::Code(secret)
+            } else {
+                ExchangeSecret::Refresh(secret)
+            },
             TokenPair {
                 access: &access,
                 refresh: &refresh,
             },
             |grant| {
-                if grant.client != client
-                    || grant.resource != self.resource
-                    || grant.expires <= now()
+                let token = grant.token();
+                if token.client.as_ref() != client
+                    || token.resource.as_ref() != self.resource.as_ref()
+                    || token.expires <= now()
                 {
-                    return Err(Error("invalid_grant"));
+                    return Err(Error::Rejected("invalid_grant"));
                 }
-                if code {
+                if let ExchangeGrant::Code(grant) = grant {
                     let verifier = val(params, "code_verifier")?;
                     if !(43..=128).contains(&verifier.len())
                         || !verifier
                             .bytes()
                             .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b))
                     {
-                        return Err(Error("invalid_grant"));
+                        return Err(Error::Rejected("invalid_grant"));
                     }
                     let expected = PkceCodeChallenge::from_code_verifier_sha256(
                         &PkceCodeVerifier::new(verifier.to_owned()),
                     );
-                    if grant.redirect.as_deref() != Some(val(params, "redirect_uri")?)
-                        || !grant
-                            .challenge
-                            .as_deref()
-                            .is_some_and(|challenge| eq(challenge, expected.as_str()))
+                    if grant.redirect.as_ref() != val(params, "redirect_uri")?
+                        || !eq(&grant.challenge, expected.as_str())
                     {
-                        return Err(Error("invalid_grant"));
+                        return Err(Error::Rejected("invalid_grant"));
                     }
                 }
                 Ok(())
@@ -293,33 +361,32 @@ impl Auth {
             json!({"access_token":access,"token_type":"Bearer","expires_in":3600,"refresh_token":refresh,"scope":scope}),
         )
     }
-    pub fn token_access(&self, token: &str) -> Result<Option<(String, Vec<String>)>> {
-        Ok(self
-            .db
+    /// Resolve an access token into its owning client and compact permission set.
+    pub fn token_access(&self, token: &str) -> Result<Option<(Box<str>, Scopes)>> {
+        self.db
             .access_grant(token)?
-            .filter(|grant| grant.resource == self.resource && grant.expires > now())
-            .map(|grant| {
-                (
-                    grant.client,
-                    grant.scope.split_whitespace().map(str::to_owned).collect(),
-                )
-            }))
+            .filter(|grant| {
+                grant.resource.as_ref() == self.resource.as_ref() && grant.expires > now()
+            })
+            .map(|grant| Ok((grant.client, Scopes::parse(&grant.scope)?)))
+            .transpose()
     }
+    /// Check whether the client retains a live refresh grant permitting events.
     pub fn event_grant_active(&self, client: &str) -> Result<bool> {
-        Ok(self
-            .db
-            .grant_scopes(client, &self.resource, true)?
-            .iter()
-            .any(|scope| scope.split_whitespace().any(|s| s == "mail:read")))
+        self.db
+            .has_read_grant(client, &self.resource, GrantUse::Events)
     }
 }
 
 /// Authorization policy supplied by the host process.
 #[derive(Clone)]
 pub struct AuthConfig {
-    pub public_url: String,
-    pub redirects: Vec<String>,
-    pub owner_password: Arc<Zeroizing<String>>,
+    /// Configured public HTTPS origin.
+    pub public_url: Box<str>,
+    /// Explicit callback allowlist; registration must match its policy.
+    pub redirects: Box<[Box<str>]>,
+    /// Independent owner credential, separate from mailbox credentials.
+    pub owner_password: Arc<Zeroizing<Box<str>>>,
 }
 
 /// HTTPS callbacks are exact. Native callbacks require an explicit loopback IP;
@@ -341,9 +408,44 @@ pub fn validate_oauth_redirect(redirect: &str) -> Result<url::Url> {
                 && u.port() != Some(0)
                 && u.as_str() == redirect))
     {
-        return Err(Error(
+        return Err(Error::Rejected(
             "Use exact HTTPS callbacks or canonical HTTP loopback IP callbacks",
         ));
     }
     Ok(u)
+}
+
+/// An exact registered callback plus its parsed URL for loopback policy checks.
+struct Redirect {
+    /// Exact original spelling used for registered-callback equality.
+    literal: Box<str>,
+    /// Callback URL used for subscription identity and delivery.
+    url: url::Url,
+}
+/// Signed consent data, independent of its HTTP presentation.
+pub struct Consent {
+    /// Signed hidden authorization fields sent back by the browser.
+    pub fields: Params,
+    /// Random browser-verification token whose hash/signature is checked on submit.
+    pub csrf: Box<str>,
+    /// Parsed registered callback used for navigation policy.
+    pub callback: url::Url,
+}
+
+/// `Client × RegisteredRedirect × S256Challenge × State × Scopes` after policy checks.
+/// Only `Auth::checked` constructs this private product; the URL and its exact
+/// registered spelling are retained for separate navigation and equality semantics.
+struct Authorization {
+    /// OAuth client identity bound to this grant or setup invitation.
+    client: Box<str>,
+    /// Exact registered callback URI required during code exchange.
+    redirect: Box<str>,
+    /// Parsed registered callback used for navigation policy.
+    callback: url::Url,
+    /// S256 PKCE challenge bound to the authorization code.
+    challenge: Box<str>,
+    /// Opaque client state preserved unchanged through authorization.
+    state: Box<str>,
+    /// Canonical scope text or parsed permission set.
+    scope: Scopes,
 }

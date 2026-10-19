@@ -1,5 +1,4 @@
 use crate::{
-    config::Settings,
     form::form,
     mcp::{Mcp, Principal, Scopes},
 };
@@ -31,17 +30,27 @@ use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore},
 };
 
+/// HTTP application dependency product plus bounded admission and login-attempt state.
+/// Private fields prevent adapters from replacing runtime services or budgets.
 #[derive(Clone)]
-pub struct App {
-    pub setup: Arc<crate::account_setup::AccountSetup>,
-    pub mail: Arc<MailService>,
-    pub auth: Arc<Auth>,
-    pub requests: Arc<Semaphore>,
-    pub attempts: Arc<Mutex<Vec<Instant>>>,
-    pub events: Option<Arc<mail_bridge_events::Events>>,
+struct App {
+    /// Shared private account-setup invitation service.
+    setup: Arc<crate::account_setup::AccountSetup>,
+    /// Mail service used by HTTP and MCP adapters.
+    mail: Arc<MailService>,
+    /// Authorization service used to resolve current grants.
+    auth: Arc<Auth>,
+    /// Global HTTP request admission budget.
+    requests: Arc<Semaphore>,
+    /// Completed delivery failures or bounded callback-attempt history.
+    attempts: Arc<Mutex<Vec<Instant>>>,
+    /// Optional event service; absence disables event discovery and operations.
+    events: Option<Arc<mail_bridge_events::Events>>,
 }
+/// Owned MCP method inspected by middleware before scope enforcement.
 #[derive(Clone)]
 struct EventMethod(String);
+/// Create a generic credential-safe HTTP rejection.
 fn error(status: StatusCode) -> Response {
     (
         status,
@@ -49,6 +58,7 @@ fn error(status: StatusCode) -> Response {
     )
         .into_response()
 }
+/// Attach cache, referrer and content-type privacy headers to a response.
 fn private(mut response: Response) -> Response {
     response.headers_mut().insert(
         header::CACHE_CONTROL,
@@ -64,24 +74,28 @@ fn private(mut response: Response) -> Response {
     );
     response
 }
+/// Apply privacy headers to successful responses and middleware rejections.
 async fn privacy_headers(request: Request, next: Next) -> Response {
     private(next.run(request).await)
 }
 
+/// Report that the HTTP process is running without accessing providers.
 async fn health() -> Json<serde_json::Value> {
     Json(json!({"status": "ok"}))
 }
 
+/// Probe local account persistence without waiting on a busy store mutex.
 async fn ready(State(state): State<App>) -> Response {
     // Never wait for a busy database mutex on the single-threaded runtime.
     // Check the account store without reading credentials or contacting providers.
-    let available = state.mail.db.ready();
+    let available = state.mail.ready();
     if available {
         health().await.into_response()
     } else {
         error(StatusCode::SERVICE_UNAVAILABLE)
     }
 }
+/// Bound HTTP work and adapt event discovery around the MCP transport.
 async fn limits(State(state): State<App>, mut request: Request, next: Next) -> Response {
     let Ok(_permit) = state.requests.clone().try_acquire_owned() else {
         return error(StatusCode::TOO_MANY_REQUESTS);
@@ -146,6 +160,7 @@ async fn limits(State(state): State<App>, mut request: Request, next: Next) -> R
     }
     private(response)
 }
+/// Resolve Bearer authorization and attach the client and compact scope set.
 async fn authenticated(State(state): State<App>, mut request: Request, next: Next) -> Response {
     if request.headers().contains_key(header::ORIGIN) {
         return error(StatusCode::FORBIDDEN);
@@ -161,7 +176,7 @@ async fn authenticated(State(state): State<App>, mut request: Request, next: Nex
             .extensions()
             .get::<EventMethod>()
             .is_some_and(|m| m.0 == "events/subscribe")
-            && !scopes.iter().any(|v| v == "mail:read")
+            && !scopes.contains(mail_bridge_core::scope::Scope::Read)
         {
             let mut response = error(StatusCode::FORBIDDEN);
             if let Ok(value) = format!(
@@ -189,12 +204,15 @@ async fn authenticated(State(state): State<App>, mut request: Request, next: Nex
         response
     }
 }
+/// Build OAuth authorization-server or protected-resource discovery metadata.
 async fn metadata(State(state): State<App>) -> Json<serde_json::Value> {
     Json(state.auth.metadata(false))
 }
+/// Serve protected-resource metadata for the canonical MCP resource.
 async fn resource(State(state): State<App>) -> Json<serde_json::Value> {
     Json(state.auth.metadata(true))
 }
+/// Register a bounded set of policy-approved client callbacks.
 async fn register(State(state): State<App>, headers: HeaderMap, body: Bytes) -> Response {
     if body.len() > 16384
         || headers.contains_key(header::ORIGIN)
@@ -214,13 +232,20 @@ async fn register(State(state): State<App>, headers: HeaderMap, body: Bytes) -> 
         Err(_) => error(StatusCode::BAD_REQUEST),
     }
 }
+/// Prepare signed authorization data and render the private browser consent response.
 async fn consent(State(state): State<App>, RawQuery(query): RawQuery) -> Response {
     let result = form(query.unwrap_or_default().as_bytes()).and_then(|params| {
-        let (page, cookie) = state.auth.consent_form(&params)?;
-        // consent_form validates this URI against the registered client and
-        // policy before its origin is admitted to the form's redirect CSP.
-        let callback = url::Url::parse(&params["redirect_uri"]).map_err(mail_bridge_core::safe)?;
-        Ok((page, cookie, callback.origin().ascii_serialization()))
+        let consent = state.auth.consent(&params)?;
+        let page = render_consent(&consent.fields);
+        let cookie = format!(
+            "__Host-mail-bridge={}; Secure; HttpOnly; SameSite=Lax; Path=/",
+            consent.csrf
+        );
+        Ok((
+            page,
+            cookie,
+            consent.callback.origin().ascii_serialization(),
+        ))
     });
     match result {
         Ok((page, cookie, callback_origin)) => {
@@ -255,12 +280,14 @@ async fn consent(State(state): State<App>, RawQuery(query): RawQuery) -> Respons
         Err(_) => error(StatusCode::BAD_REQUEST),
     }
 }
+/// Recognize the required URL-encoded form content type.
 fn is_form(headers: &HeaderMap) -> bool {
     headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|s| s.split(';').next() == Some("application/x-www-form-urlencoded"))
 }
+/// Render an isolated private setup response with its required browser headers.
 fn setup_response(page: String) -> Response {
     let mut response = Response::new(Body::from(page));
     let headers = response.headers_mut();
@@ -284,10 +311,11 @@ fn setup_response(page: String) -> Response {
     );
     response
 }
+/// Open one client-bound setup invitation and issue its current browser cookie.
 async fn setup_page(State(state): State<App>, RawQuery(query): RawQuery) -> Response {
     let result = form(query.unwrap_or_default().as_bytes()).and_then(|params| {
         if params.len() != 1 {
-            return Err(mail_bridge_core::Error("Invalid setup link"));
+            return Err(mail_bridge_core::Error::Rejected("Invalid setup link"));
         }
         state
             .setup
@@ -305,11 +333,11 @@ async fn setup_page(State(state): State<App>, RawQuery(query): RawQuery) -> Resp
         Err(_) => error(StatusCode::BAD_REQUEST),
     }
 }
+/// Verify same-origin private form submission and commit one account through the setup state machine.
 async fn setup_save(State(state): State<App>, headers: HeaderMap, body: Bytes) -> Response {
     if body.len() > 16384
         || !is_form(&headers)
-        || headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())
-            != Some(state.auth.base.as_str())
+        || headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) != Some(state.auth.base())
     {
         return error(StatusCode::FORBIDDEN);
     }
@@ -335,14 +363,14 @@ async fn setup_save(State(state): State<App>, headers: HeaderMap, body: Bytes) -
             response.headers_mut().insert(header::SET_COOKIE, header::HeaderValue::from_static("__Host-mail-bridge-setup=; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"));
             response
         },
-        Err(e) => (StatusCode::BAD_REQUEST, setup_response(format!("<!doctype html><meta charset=\"utf-8\"><title>添加未完成</title><h1>添加未完成</h1><p>{}</p><p>请返回上一页重新填写；不要将密码粘贴到聊天。</p>", html_escape::encode_text(e.0)))).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, setup_response(format!("<!doctype html><meta charset=\"utf-8\"><title>添加未完成</title><h1>添加未完成</h1><p>{}</p><p>请返回上一页重新填写；不要将密码粘贴到聊天。</p>", html_escape::encode_text(e.message())))).into_response(),
     }
 }
+/// Verify browser confirmation and owner approval, then issue a short-lived code.
 async fn authorize(State(state): State<App>, headers: HeaderMap, body: Bytes) -> Response {
     if body.len() > 16384
         || !is_form(&headers)
-        || headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())
-            != Some(state.auth.base.as_str())
+        || headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) != Some(state.auth.base())
     {
         return error(StatusCode::FORBIDDEN);
     }
@@ -375,6 +403,7 @@ async fn authorize(State(state): State<App>, headers: HeaderMap, body: Bytes) ->
         Err(_) => error(StatusCode::BAD_REQUEST),
     }
 }
+/// Apply client, resource and PKCE policy to an atomic one-use grant exchange.
 async fn exchange(State(state): State<App>, headers: HeaderMap, body: Bytes) -> Response {
     if body.len() > 16384 || !is_form(&headers) {
         return error(StatusCode::BAD_REQUEST);
@@ -388,11 +417,8 @@ async fn exchange(State(state): State<App>, headers: HeaderMap, body: Bytes) -> 
             .into_response(),
     }
 }
-pub fn router(settings: &Settings, auth: Arc<Auth>, mail: Arc<MailService>) -> Router {
-    router_with_events(settings, auth, mail, None)
-}
-pub fn router_with_events(
-    settings: &Settings,
+/// Assemble HTTP, OAuth, private setup and authenticated MCP routes.
+pub fn router(
     auth: Arc<Auth>,
     mail: Arc<MailService>,
     events: Option<Arc<mail_bridge_events::Events>>,
@@ -405,22 +431,12 @@ pub fn router_with_events(
         attempts: Arc::new(Mutex::new(Vec::new())),
         events: events.clone(),
     };
-    let mcp = Mcp {
-        auth,
-        mail,
-        events,
-        setup: state.setup.clone(),
-    };
-    let url = url::Url::parse(&settings.public_url).expect("validated URL");
+    let [host, authority] = auth.hosts().map(str::to_owned);
+    let mcp = Mcp::new(state.setup.clone(), mail, auth, events);
     let mut config = StreamableHttpServerConfig::default()
         .with_json_response(true)
         .with_max_request_body_bytes(65536)
-        .with_allowed_hosts([
-            url.host_str().unwrap().to_owned(),
-            url[url::Position::BeforeHost..url::Position::AfterPort].to_owned(),
-            "127.0.0.1".into(),
-            "localhost".into(),
-        ]);
+        .with_allowed_hosts([host, authority, "127.0.0.1".into(), "localhost".into()]);
     config.legacy_session_mode = false;
     let service = StreamableHttpService::new(
         move || Ok(mcp.clone()),
@@ -450,14 +466,30 @@ pub fn router_with_events(
 
 /// A permit lives for the entire TCP connection, including idle keepalive time.
 pub struct LimitedListener {
-    pub inner: TcpListener,
-    pub gate: Arc<Semaphore>,
+    /// Owned underlying connection or IO object.
+    inner: TcpListener,
+    /// Shared fixed-capacity admission budget; permits live for the entire operation.
+    gate: Arc<Semaphore>,
 }
+impl LimitedListener {
+    /// Bind a listener to a fixed nonzero connection budget.
+    pub fn new(inner: TcpListener, capacity: std::num::NonZeroUsize) -> Self {
+        Self {
+            inner,
+            gate: Arc::new(Semaphore::new(capacity.get())),
+        }
+    }
+}
+/// Owned TCP stream paired with exactly one connection permit.
+/// Dropping the connection releases its budget even when a request is cancelled.
 pub struct Connection {
+    /// Owned underlying connection or IO object.
     inner: TcpStream,
+    /// Owned connection permit released when this connection is dropped.
     _permit: OwnedSemaphorePermit,
 }
 impl AsyncRead for Connection {
+    /// Read into a bounded scratch buffer and inspect bytes before exposing them upstream.
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -467,6 +499,7 @@ impl AsyncRead for Connection {
     }
 }
 impl AsyncWrite for Connection {
+    /// Delegate writing to the owned underlying IO object.
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -474,16 +507,21 @@ impl AsyncWrite for Connection {
     ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.inner).poll_write(cx, buf)
     }
+    /// Flush the owned underlying IO object.
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.inner).poll_flush(cx)
     }
+    /// Shut down the owned underlying IO object.
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
 impl axum::serve::Listener for LimitedListener {
+    /// Accepted connection type retaining its lifetime permit.
     type Io = Connection;
+    /// Socket address reported by the underlying TCP listener.
     type Addr = std::net::SocketAddr;
+    /// Acquire a connection permit before accepting a socket; retain it for the connection lifetime.
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
         loop {
             let permit = self
@@ -506,7 +544,29 @@ impl axum::serve::Listener for LimitedListener {
             }
         }
     }
+    /// Return the bound address of the owned TCP listener.
     fn local_addr(&self) -> io::Result<Self::Addr> {
         self.inner.local_addr()
     }
+}
+
+/// Render signed authorization fields without interpreting authorization policy.
+fn render_consent(params: &mail_bridge_auth::Params) -> String {
+    use std::fmt::Write;
+    let mut inputs = String::new();
+    for (key, value) in params {
+        write!(
+            &mut inputs,
+            "<input type=\"hidden\" name=\"{}\" value=\"{}\">",
+            html_escape::encode_double_quoted_attribute(key),
+            html_escape::encode_double_quoted_attribute(value)
+        )
+        .expect("string writes are infallible");
+    }
+    format!(
+        "<!doctype html><meta charset=\"utf-8\"><title>Mail Bridge authorization</title><h1>Authorize Mail Bridge</h1><p>Requested permissions: {}</p><p>Client callback: {}</p><p>Only authorize your own ChatGPT connection. Enter your independent service owner password, never your mailbox authorization code.</p><form method=\"post\" action=\"/oauth/authorize\">{}<label>Owner password <input type=\"password\" name=\"owner_password\" required autocomplete=\"off\"></label><button type=\"submit\">Authorize</button></form>",
+        html_escape::encode_text(&params["scope"]),
+        html_escape::encode_text(&params["redirect_uri"]),
+        inputs
+    )
 }

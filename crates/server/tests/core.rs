@@ -8,7 +8,7 @@ use lettre::Message;
 use mail_bridge_auth::{Auth, Params};
 use mail_bridge_core::{
     Error, Result,
-    account::{Config, RawConfig, Security},
+    account::{AccountName, AccountSettings, Config, MailboxCredential, RawConfig, Security},
 };
 use mail_bridge_mail::{
     backend::{Backend, RealBackend},
@@ -17,7 +17,7 @@ use mail_bridge_mail::{
     imap::{search, utf7_decode, utf7_encode},
     mime::parse_mail,
     page::{Page, SearchCriteria},
-    service::{MailAccount, MailService},
+    service::MailService,
 };
 use mail_bridge_rust::{config::Settings, http::router};
 use mail_bridge_store::{Db, hash};
@@ -40,13 +40,13 @@ struct Fake {
 }
 impl Backend for Fake {
     fn read(&self, _: ReadCommand) -> BoxFuture<'_, Result<Value>> {
-        Box::pin(async { Err(Error("Mock read is not connected")) })
+        Box::pin(async { Err(Error::Rejected("Mock read is not connected")) })
     }
     fn send(&self, _: Message) -> BoxFuture<'_, Result<()>> {
         Box::pin(async {
             self.sent.fetch_add(1, Ordering::SeqCst);
             if self.fail.load(Ordering::SeqCst) {
-                Err(Error("SMTP outcome uncertain; do not retry"))
+                Err(Error::Rejected("SMTP outcome uncertain; do not retry"))
             } else {
                 Ok(())
             }
@@ -72,7 +72,7 @@ fn settings(path: &Path) -> Settings {
             "mock-owner-password-0000000000000000".into(),
         )),
         public_url: "https://mail.example.com".into(),
-        redirects: vec!["https://chatgpt.com/connector_platform_oauth_redirect".into()],
+        redirects: vec!["https://chatgpt.com/connector_platform_oauth_redirect".into()].into(),
         data_dir: path.to_owned(),
         bind: "127.0.0.1:18765".parse().unwrap(),
     }
@@ -82,20 +82,32 @@ fn setup() -> (tempfile::TempDir, Settings, Db, Arc<Fake>, Arc<MailService>) {
     let settings = settings(dir.path());
     let db = Db::open(&dir.path().join("test.db")).unwrap();
     let fake = Arc::new(Fake::default());
-    let account = MailAccount {
-        id: "qq".into(),
-        name: "Mock QQ".into(),
-        config: Arc::new(mock_config().try_into().unwrap()),
-        backend: Some(fake.clone()),
-        credential_status: "ready",
-        concurrency: Default::default(),
-    };
-    let service = Arc::new(MailService {
-        accounts: Arc::new(std::sync::RwLock::new([("qq".into(), account)].into())),
-        db: db.clone(),
-        gate: Arc::new(tokio::sync::Semaphore::new(1)),
-    });
+    let service = fixture_service(
+        db.clone(),
+        vec![("qq", mock_config(), Some(fake.clone()))],
+        1,
+    );
     (dir, settings, db, fake, service)
+}
+
+type FixtureBackend<'a> = (&'a str, RawConfig, Option<Arc<dyn Backend>>);
+fn fixture_service(db: Db, accounts: Vec<FixtureBackend<'_>>, capacity: usize) -> Arc<MailService> {
+    let accounts = accounts.into_iter().map(|(id, raw, backend)| {
+        (
+            AccountSettings {
+                id: id.parse().unwrap(),
+                name: AccountName::parse(format!("Mock {id}").into()).unwrap(),
+                config: Arc::new(raw.try_into().unwrap()),
+                password: MailboxCredential::parse(Zeroizing::new("mock-mailbox-only".into()))
+                    .unwrap(),
+            },
+            backend,
+        )
+    });
+    Arc::new(
+        MailService::with_backends(accounts, db, std::num::NonZeroUsize::new(capacity).unwrap())
+            .unwrap(),
+    )
 }
 
 /// Controllable network latency: each backend operation reports entry and waits
@@ -146,24 +158,87 @@ fn start_read(
 }
 
 #[tokio::test(start_paused = true)]
-async fn concurrent_reads_are_bounded_and_other_accounts_make_progress() {
-    let (_dir, _, _, _, original) = setup();
-    let mut service = (*original).clone();
-    service.gate = Arc::new(tokio::sync::Semaphore::new(
-        mail_bridge_mail::service::MAIL_CONCURRENCY,
-    ));
+async fn invalid_commands_fail_before_queueing_or_provider_io() {
+    let (_dir, _, db, _, _) = setup();
     let (backend, mut started) = slow_backend();
-    {
-        let mut accounts = service.accounts.write().unwrap();
-        accounts.get_mut("qq").unwrap().backend = Some(backend.clone());
-        for id in ["zju", "third"] {
-            let mut account = accounts["qq"].clone();
-            account.id = id.into();
-            account.concurrency = Default::default();
-            accounts.insert(id.into(), account);
-        }
+    let service = fixture_service(
+        db.clone(),
+        vec![("qq", mock_config(), Some(backend.clone()))],
+        1,
+    );
+    let occupied = start_read(&service, "qq");
+    assert_eq!(started.recv().await, Some("read"));
+    for (name, mut args) in [
+        ("list_folders", json!({"limit":0})),
+        ("list_messages", json!({"before_uid":3})),
+        ("search_messages", json!({"field":"ALL", "query":"x"})),
+        ("read_message", json!({"uid":0, "uidvalidity":1})),
+        (
+            "send_email",
+            json!({"to":["a@example.com"],"subject":"s","body":"b","request_id":"short"}),
+        ),
+    ] {
+        args["account_id"] = json!("qq");
+        let error = tokio::time::timeout(
+            std::time::Duration::from_millis(1),
+            service.dispatch(name, args),
+        )
+        .await
+        .expect("invalid commands never wait for the occupied queue")
+        .unwrap_err();
+        assert!(!error.message().contains("queue"));
+        assert!(started.try_recv().is_err());
     }
-    let service = Arc::new(service);
+    let attempts: i64 = connection(&db)
+        .query_row("SELECT count(*) FROM account_attempts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(attempts, 0);
+    backend.release.add_permits(1);
+    occupied.await.unwrap().unwrap();
+}
+
+#[test]
+fn account_configuration_roundtrips_legacy_storage_and_excludes_invalid_states() {
+    use mail_bridge_core::account::{Account, Mailbox};
+    for id in ["", "UPPER", "bad id", "a\nb"] {
+        assert!(id.parse::<Account>().is_err());
+    }
+    assert!("work-1".parse::<Account>().is_ok());
+    assert!("\r\n".parse::<Mailbox>().is_err());
+    for (configured, enabled) in [(false, false), (true, false), (true, true)] {
+        let mut raw = mock_config();
+        raw.smtp_enabled = enabled;
+        if !configured {
+            raw.smtp_host = "".into();
+            raw.smtp_port = 0;
+        }
+        let wire = serde_json::to_value(&raw).unwrap();
+        let parsed: Config = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(parsed.sending_enabled(), enabled);
+        assert_eq!(parsed.smtp().is_some(), configured);
+        assert_eq!(serde_json::to_value(parsed).unwrap(), wire);
+    }
+    let mut invalid = mock_config();
+    invalid.smtp_host = "".into();
+    assert!(Config::try_from(invalid).is_err());
+    let mut invalid = mock_config();
+    invalid.imap_port = 0;
+    assert!(Config::try_from(invalid).is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn concurrent_reads_are_bounded_and_other_accounts_make_progress() {
+    let (_dir, _, db, _, _) = setup();
+    let (backend, mut started) = slow_backend();
+    let service = fixture_service(
+        db,
+        vec![
+            ("qq", mock_config(), Some(backend.clone())),
+            ("zju", mock_config(), Some(backend.clone())),
+            ("third", mock_config(), Some(backend.clone())),
+        ],
+        4,
+    );
     let first = start_read(&service, "qq");
     let second = start_read(&service, "qq");
     assert_eq!(started.recv().await, Some("read"));
@@ -193,21 +268,15 @@ async fn concurrent_reads_are_bounded_and_other_accounts_make_progress() {
     }
     assert_eq!(started.recv().await, Some("read"));
     assert_eq!(started.recv().await, Some("read"));
-    assert_eq!(service.gate.available_permits(), 4);
 }
 
 #[tokio::test(start_paused = true)]
 async fn queue_timeout_and_cancellation_never_start_backend_or_leak_permits() {
-    let (_dir, _, _, _, service) = setup();
+    let (_dir, _, db, _, _) = setup();
     let (backend, mut started) = slow_backend();
-    service
-        .accounts
-        .write()
-        .unwrap()
-        .get_mut("qq")
-        .unwrap()
-        .backend = Some(backend.clone());
-    let held = service.gate.acquire().await.unwrap();
+    let service = fixture_service(db, vec![("qq", mock_config(), Some(backend.clone()))], 1);
+    let held = start_read(&service, "qq");
+    assert_eq!(started.recv().await, Some("read"));
     let cancelled = start_read(&service, "qq");
     tokio::task::yield_now().await;
     cancelled.abort();
@@ -220,34 +289,26 @@ async fn queue_timeout_and_cancellation_never_start_backend_or_leak_permits() {
             .await
             .unwrap()
             .unwrap_err()
-            .0
+            .message()
             .contains("this call did not start")
     );
     assert!(started.try_recv().is_err());
-    drop(held);
+    backend.release.add_permits(1);
+    held.await.unwrap().unwrap();
     let active = start_read(&service, "qq");
     assert_eq!(started.recv().await, Some("read"));
     active.abort();
     assert!(active.await.unwrap_err().is_cancelled());
-    assert_eq!(service.gate.available_permits(), 1);
+
     backend.release.add_permits(1);
     start_read(&service, "qq").await.unwrap().unwrap();
 }
 
 #[tokio::test(start_paused = true)]
 async fn sends_do_not_block_reads_and_concurrent_duplicate_sends_are_deduplicated() {
-    let (_dir, _, _, _, original) = setup();
-    let mut service = (*original).clone();
-    service.gate = Arc::new(tokio::sync::Semaphore::new(4));
+    let (_dir, _, db, _, _) = setup();
     let (backend, mut started) = slow_backend();
-    service
-        .accounts
-        .write()
-        .unwrap()
-        .get_mut("qq")
-        .unwrap()
-        .backend = Some(backend.clone());
-    let service = Arc::new(service);
+    let service = fixture_service(db, vec![("qq", mock_config(), Some(backend.clone()))], 4);
     let args = json!({"account_id":"qq","to":["a@example.com"],"subject":"s","body":"b","request_id":"concurrent-send-0001"});
     let send = |args: Value| {
         let service = service.clone();
@@ -649,11 +710,11 @@ async fn durable_send_dedup_and_ambiguous_failure() {
         service.dispatch("send_email", args.clone()).await.unwrap()["status"],
         "accepted_by_smtp"
     );
-    let restarted = MailService {
-        accounts: service.accounts.clone(),
-        db: Db::open(&dir.path().join("test.db")).unwrap(),
-        gate: Arc::new(tokio::sync::Semaphore::new(1)),
-    };
+    let restarted = fixture_service(
+        Db::open(&dir.path().join("test.db")).unwrap(),
+        vec![("qq", mock_config(), Some(fake.clone()))],
+        1,
+    );
     restarted
         .dispatch("send_email", args.clone())
         .await
@@ -678,21 +739,8 @@ async fn durable_send_dedup_and_ambiguous_failure() {
     assert_eq!(fake.sent.load(Ordering::SeqCst), 2);
     let mut raw = mock_config();
     raw.smtp_enabled = false;
-    service
-        .accounts
-        .write()
-        .unwrap()
-        .get_mut("qq")
-        .unwrap()
-        .config = Arc::new(raw.try_into().unwrap());
-    assert!(service.dispatch("send_email", args).await.is_err());
-    let _permit = service.gate.acquire().await.unwrap();
-    assert!(
-        service
-            .dispatch("list_messages", json!({"account_id":"qq"}))
-            .await
-            .is_err()
-    );
+    let disabled = fixture_service(db.clone(), vec![("qq", raw, Some(fake.clone()))], 1);
+    assert!(disabled.dispatch("send_email", args).await.is_err());
     drop(db);
 }
 
@@ -761,12 +809,18 @@ fn oauth_redirect_policy_is_explicit_and_loopback_only() {
     let (dir, mut settings, db, _fake, _service) = setup();
     let native = "http://127.0.0.1:58597/callback";
     let web = settings.redirects[0].clone();
-    assert!(!Auth::new(&settings.auth_config(), db.clone()).redirect_allowed(native));
-    settings.redirects.extend([
+    assert!(
+        !Auth::new(&settings.auth_config(), db.clone())
+            .unwrap()
+            .redirect_allowed(native)
+    );
+    let mut redirects = settings.redirects.into_vec();
+    redirects.extend([
         "http://127.0.0.1/callback".into(),
         "http://[::1]/callback".into(),
     ]);
-    let auth = Auth::new(&settings.auth_config(), db.clone());
+    settings.redirects = redirects.into_boxed_slice();
+    let auth = Auth::new(&settings.auth_config(), db.clone()).unwrap();
     for allowed in [
         native,
         "http://127.0.0.1:58598/callback",
@@ -795,8 +849,8 @@ fn oauth_redirect_policy_is_explicit_and_loopback_only() {
         assert!(!auth.redirect_allowed(rejected), "{rejected}");
         assert!(auth.register(json!({"redirect_uris":[rejected]})).is_err());
     }
-    settings.redirects = vec![native.into()];
-    let fixed = Auth::new(&settings.auth_config(), db);
+    settings.redirects = vec![native.into()].into();
+    let fixed = Auth::new(&settings.auth_config(), db).unwrap();
     assert!(fixed.redirect_allowed(native));
     assert!(!fixed.redirect_allowed("http://127.0.0.1:58598/callback"));
     drop(dir);
@@ -812,9 +866,9 @@ async fn http_oauth_pkce_mcp_and_scope() {
 async fn oauth_pkce_mcp_and_scope_for_callback(callback: &str) {
     let (_dir, mut settings, db, _fake, service) = setup();
     if callback.starts_with("http:") {
-        settings.redirects = vec!["http://127.0.0.1/callback".into()];
+        settings.redirects = vec!["http://127.0.0.1/callback".into()].into();
     }
-    let auth = Arc::new(Auth::new(&settings.auth_config(), db.clone()));
+    let auth = Arc::new(Auth::new(&settings.auth_config(), db.clone()).unwrap());
     assert_eq!(
         auth.metadata(false)["scopes_supported"],
         json!(["mail:read"])
@@ -823,7 +877,7 @@ async fn oauth_pkce_mcp_and_scope_for_callback(callback: &str) {
         auth.metadata(true)["scopes_supported"],
         json!(["mail:read"])
     );
-    let app = router(&settings, auth.clone(), service);
+    let app = router(auth.clone(), service, None);
     let (status, headers, _) = request(
         app.clone(),
         "/mcp",
@@ -854,7 +908,7 @@ async fn oauth_pkce_mcp_and_scope_for_callback(callback: &str) {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         serde_json::from_slice::<Value>(&bytes).unwrap()["resource"],
-        auth.resource
+        auth.resource()
     );
     let (status, _, bytes) = request(
         app.clone(),
@@ -881,7 +935,7 @@ async fn oauth_pkce_mcp_and_scope_for_callback(callback: &str) {
         ("response_type".into(), "code".into()),
         ("code_challenge".into(), challenge.as_str().into()),
         ("code_challenge_method".into(), "S256".into()),
-        ("resource".into(), auth.resource.clone()),
+        ("resource".into(), auth.resource().to_owned()),
         ("state".into(), "mock-state".into()),
         ("scope".into(), "mail:read".into()),
     ]);
@@ -890,7 +944,7 @@ async fn oauth_pkce_mcp_and_scope_for_callback(callback: &str) {
         "redirect_uri".into(),
         "http://127.0.0.1:58598/callback".into(),
     );
-    assert!(auth.consent_form(&wrong_callback).is_err());
+    assert!(auth.consent(&wrong_callback).is_err());
     let path = format!(
         "/oauth/authorize?{}",
         serde_urlencoded::to_string(&params).unwrap()
@@ -914,10 +968,7 @@ async fn oauth_pkce_mcp_and_scope_for_callback(callback: &str) {
         .unwrap()
         .to_owned();
     let mut fields = hidden(std::str::from_utf8(&bytes).unwrap());
-    fields.insert(
-        "owner_password".into(),
-        settings.owner_password.as_str().to_owned(),
-    );
+    fields.insert("owner_password".into(), settings.owner_password.to_string());
     // Retain strict Origin, signed fields, cookie and owner-password checks.
     for origin in [None, Some("null"), Some("https://evil.example")] {
         let response = request(
@@ -975,7 +1026,7 @@ async fn oauth_pkce_mcp_and_scope_for_callback(callback: &str) {
     assert_eq!(status, StatusCode::SEE_OTHER);
     let location = url::Url::parse(headers["location"].to_str().unwrap()).unwrap();
     let returned: Params = location.query_pairs().into_owned().collect();
-    assert_eq!(returned["iss"], settings.public_url);
+    assert_eq!(returned["iss"], settings.public_url.as_ref());
     assert_eq!(returned["state"], "mock-state");
     let mut exchange = Params::from([
         ("grant_type".into(), "authorization_code".into()),
@@ -983,7 +1034,7 @@ async fn oauth_pkce_mcp_and_scope_for_callback(callback: &str) {
         ("redirect_uri".into(), callback.into()),
         ("code".into(), returned["code"].clone()),
         ("code_verifier".into(), verifier),
-        ("resource".into(), auth.resource.clone()),
+        ("resource".into(), auth.resource().to_owned()),
     ]);
     let body = serde_urlencoded::to_string(&exchange).unwrap();
     let mut invalid_pkce = exchange.clone();
@@ -1056,7 +1107,7 @@ async fn oauth_pkce_mcp_and_scope_for_callback(callback: &str) {
         ("grant_type".into(), "refresh_token".into()),
         ("client_id".into(), client),
         ("refresh_token".into(), refresh.clone()),
-        ("resource".into(), auth.resource.clone()),
+        ("resource".into(), auth.resource().to_owned()),
     ]);
     let rotated = auth.exchange(&exchange).unwrap();
     assert_ne!(rotated["refresh_token"], refresh);
@@ -1089,9 +1140,9 @@ async fn oauth_pkce_mcp_and_scope_for_callback(callback: &str) {
 async fn probes_check_local_state_without_mail_access() {
     let (_dir, settings, db, fake, mail) = setup();
     let app = router(
-        &settings,
-        Arc::new(Auth::new(&settings.auth_config(), db.clone())),
+        Arc::new(Auth::new(&settings.auth_config(), db.clone()).unwrap()),
         mail,
+        None,
     );
     for path in ["/healthz", "/readyz"] {
         let (status, headers, body) =
@@ -1133,9 +1184,9 @@ async fn probes_check_local_state_without_mail_access() {
 async fn privacy_headers_cover_rejections_and_rate_limits() {
     let (_dir, settings, db, _fake, mail) = setup();
     let app = router(
-        &settings,
-        Arc::new(Auth::new(&settings.auth_config(), db)),
+        Arc::new(Auth::new(&settings.auth_config(), db).unwrap()),
         mail,
+        None,
     );
     for (path, method, body, origin, expected) in [
         (
@@ -1196,9 +1247,9 @@ async fn privacy_headers_cover_rejections_and_rate_limits() {
 async fn local_http_socket_smoke() {
     let (_dir, settings, db, _fake, mail) = setup();
     let app = router(
-        &settings,
-        Arc::new(Auth::new(&settings.auth_config(), db)),
+        Arc::new(Auth::new(&settings.auth_config(), db).unwrap()),
         mail,
+        None,
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -1216,24 +1267,20 @@ async fn local_http_socket_smoke() {
 
 #[tokio::test]
 async fn two_account_sender_and_request_id_isolation() {
-    let (dir, _settings, _db, qq, original) = setup();
-    let mut service = (*original).clone();
+    let (dir, _settings, db, qq, _original) = setup();
     let zju = Arc::new(Fake::default());
-    let mut account = service.accounts.read().unwrap()["qq"].clone();
-    account.id = "zju".into();
-    account.concurrency = Default::default();
-    account.name = "Mock ZJU".into();
     let mut raw = mock_config();
     raw.username = "school@zju.example".into();
     raw.from_address = "school@zju.example".into();
     raw.smtp_port = 994;
-    account.config = Arc::new(raw.try_into().unwrap());
-    account.backend = Some(zju.clone());
-    service
-        .accounts
-        .write()
-        .unwrap()
-        .insert("zju".into(), account);
+    let service = fixture_service(
+        db,
+        vec![
+            ("qq", mock_config(), Some(qq.clone())),
+            ("zju", raw.clone(), Some(zju.clone())),
+        ],
+        1,
+    );
     let listed = service.dispatch("list_accounts", json!({})).await.unwrap();
     assert_eq!(listed["accounts"].as_array().unwrap().len(), 2);
     assert!(!listed.to_string().contains("mock-mailbox-only"));
@@ -1269,7 +1316,14 @@ async fn two_account_sender_and_request_id_isolation() {
     }
     assert_eq!(qq.sent.load(Ordering::SeqCst), 1);
     assert_eq!(zju.sent.load(Ordering::SeqCst), 1);
-    service.db = Db::open(&dir.path().join("test.db")).unwrap();
+    let service = fixture_service(
+        Db::open(&dir.path().join("test.db")).unwrap(),
+        vec![
+            ("qq", mock_config(), Some(qq.clone())),
+            ("zju", raw.clone(), Some(zju.clone())),
+        ],
+        1,
+    );
     for id in ["qq", "zju"] {
         send["account_id"] = json!(id);
         service.dispatch("send_email", send.clone()).await.unwrap();
@@ -1287,20 +1341,11 @@ async fn two_account_sender_and_request_id_isolation() {
             .await
             .is_err()
     );
-    service
-        .accounts
-        .write()
-        .unwrap()
-        .get_mut("zju")
-        .unwrap()
-        .backend = None;
-    service
-        .accounts
-        .write()
-        .unwrap()
-        .get_mut("zju")
-        .unwrap()
-        .credential_status = "missing";
+    let service = fixture_service(
+        Db::open(&dir.path().join("test.db")).unwrap(),
+        vec![("qq", mock_config(), Some(qq.clone())), ("zju", raw, None)],
+        1,
+    );
     let status = service.dispatch("list_accounts", json!({})).await.unwrap();
     let account = status["accounts"]
         .as_array()

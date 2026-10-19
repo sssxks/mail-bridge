@@ -6,10 +6,13 @@ use std::collections::HashSet;
 /// Source bits distinguish plain text (1), rendered HTML (2), or mixed (3).
 #[derive(Default)]
 pub(super) struct Body {
+    /// Mutable rendered text retaining one extra character for truncation reporting.
     pub text: String,
+    /// Two provenance bits: plain text = 1, HTML = 2, both = 3.
     sources: u8,
 }
 impl Body {
+    /// Describe the rendered body provenance from its two source bits.
     pub fn source(&self) -> &'static str {
         match self.sources {
             1 => "text",
@@ -18,6 +21,7 @@ impl Body {
             _ => "none",
         }
     }
+    /// Append bounded nonempty inline text while combining source provenance.
     fn append(&mut self, other: Self) {
         if other.text.trim().is_empty() {
             return;
@@ -49,14 +53,15 @@ pub(super) fn render(mail: &Message<'_>) -> Result<Body> {
     render_part(mail, &inline, 0, 0)
 }
 
+/// Walk one MIME subtree with explicit depth and retained-text limits.
 fn render_part(mail: &Message<'_>, inline: &HashSet<u32>, id: u32, depth: usize) -> Result<Body> {
     if depth > 64 {
-        return Err(Error(
+        return Err(Error::Rejected(
             "MIME body nesting exceeds limit; use your mail client",
         ));
     }
     let Some(part) = mail.part(id) else {
-        return Err(Error("Invalid MIME body structure"));
+        return Err(Error::Rejected("Invalid MIME body structure"));
     };
     if part
         .content_disposition()
@@ -88,7 +93,7 @@ fn render_part(mail: &Message<'_>, inline: &HashSet<u32>, id: u32, depth: usize)
         }),
         PartType::Html(html) if inline.contains(&id) => {
             let text = html2text::from_read(html.as_bytes(), 100)
-                .map_err(|_| Error("HTML body rendering failed; use your mail client"))?;
+                .map_err(|_| Error::Rejected("HTML body rendering failed; use your mail client"))?;
             Ok(Body {
                 text: mail_bridge_core::clipped(&text, 20001),
                 sources: 2,

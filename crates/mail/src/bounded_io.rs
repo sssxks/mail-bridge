@@ -6,11 +6,16 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+/// Maximum accepted full message size: 2 MiB.
 pub const MAX_MAIL: usize = 2 * 1024 * 1024;
+/// Maximum advertised literal size, allowing bounded header overhead.
 const MAX_LITERAL: usize = MAX_MAIL + 8192;
+/// Maximum retained IMAP protocol line: 64 KiB.
 const MAX_LINE: usize = 64 * 1024;
+/// Maximum bytes observed on one guarded IMAP connection: 4 MiB.
 const MAX_TRANSFER: usize = 4 * 1024 * 1024;
 
+/// Parse and bound a protocol literal length before the IMAP parser allocates it.
 fn literal_length(line: &[u8]) -> io::Result<Option<usize>> {
     if !line.ends_with(b"}\r\n") {
         return Ok(None);
@@ -30,14 +35,21 @@ fn literal_length(line: &[u8]) -> io::Result<Option<usize>> {
     Ok(Some(length))
 }
 
+/// Bounded protocol wrapper `Inner × TransferBytes × PartialLine × RemainingLiteral`.
+/// Private counters/buffers inspect each received byte before the upstream IMAP parser sees it.
 #[derive(Debug)]
 pub struct GuardIo<T> {
+    /// Owned underlying connection or IO object.
     pub inner: T,
+    /// Bytes observed across this guarded IMAP connection.
     total: usize,
+    /// Reusable partial protocol-line buffer, bounded by MAX_LINE.
     line: Vec<u8>,
+    /// Number of literal bytes remaining; these bytes bypass protocol-line parsing.
     literal: usize,
 }
 impl<T> GuardIo<T> {
+    /// Construct this component from its explicit dependencies.
     pub fn new(inner: T) -> Self {
         Self {
             inner,
@@ -46,6 +58,7 @@ impl<T> GuardIo<T> {
             literal: 0,
         }
     }
+    /// Account received bytes and enforce line, literal and transfer limits.
     fn inspect(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.total = self.total.saturating_add(bytes.len());
         if self.total > MAX_TRANSFER {
@@ -70,6 +83,7 @@ impl<T> GuardIo<T> {
 }
 
 impl<T: AsyncRead + Unpin> AsyncRead for GuardIo<T> {
+    /// Read into a bounded scratch buffer and inspect bytes before exposing them upstream.
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -92,6 +106,7 @@ impl<T: AsyncRead + Unpin> AsyncRead for GuardIo<T> {
     }
 }
 impl<T: AsyncWrite + Unpin> AsyncWrite for GuardIo<T> {
+    /// Delegate writing to the owned underlying IO object.
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -99,9 +114,11 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for GuardIo<T> {
     ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.inner).poll_write(cx, buf)
     }
+    /// Flush the owned underlying IO object.
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.inner).poll_flush(cx)
     }
+    /// Shut down the owned underlying IO object.
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
     }

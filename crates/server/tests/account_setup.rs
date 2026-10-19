@@ -22,7 +22,7 @@ fn fixture() -> (tempfile::TempDir, Settings, Db, Arc<Auth>, Arc<MailService>) {
     let settings = Settings {
         owner_password: Arc::new(Zeroizing::new(OWNER.into())),
         public_url: "https://mail.example.com".into(),
-        redirects: vec![],
+        redirects: vec![].into(),
         data_dir: dir.path().into(),
         bind: "127.0.0.1:0".parse().unwrap(),
     };
@@ -37,7 +37,7 @@ fn fixture() -> (tempfile::TempDir, Settings, Db, Arc<Auth>, Arc<MailService>) {
             ],
         )
         .unwrap();
-    let auth = Arc::new(Auth::new(&settings.auth_config(), db.clone()));
+    let auth = Arc::new(Auth::new(&settings.auth_config(), db.clone()).unwrap());
     let mail = Arc::new(MailService::from_store(db.clone()).unwrap());
     (dir, settings, db, auth, mail)
 }
@@ -57,6 +57,24 @@ fn fields(id: &str) -> Params {
 }
 fn account(id: &str) -> AccountSettings {
     mail_bridge_rust::form::from_form(fields(id)).unwrap()
+}
+
+#[test]
+fn single_account_lookup_does_not_decode_other_credentials_or_configuration() {
+    let (_dir, _settings, db, _auth, mail) = fixture();
+    mail.add_account(account("work")).unwrap();
+    connection(&db)
+        .execute(
+            "INSERT INTO runtime_accounts VALUES ('broken','Broken','not-json','')",
+            [],
+        )
+        .unwrap();
+    assert!(db.runtime_account_exists("work").unwrap());
+    let selected = db.runtime_account("work").unwrap().unwrap();
+    assert_eq!(selected.id.as_str(), "work");
+    assert_eq!(selected.password.as_str(), MAILBOX);
+    assert!(db.runtime_account("absent").unwrap().is_none());
+    assert!(db.runtime_account("broken").is_err());
 }
 fn hidden(page: &str) -> Params {
     page.split("<input type=\"hidden\" name=\"")
@@ -181,7 +199,7 @@ async fn rpc(app: Router, name: &str, args: Value) -> Value {
 #[tokio::test]
 async fn mcp_to_private_form_live_account_and_restart() {
     let (_dir, settings, db, auth, mail) = fixture();
-    let app = router(&settings, auth, mail.clone());
+    let app = router(auth, mail.clone(), None);
     let (status, _, _) = request(app.clone(), "/mcp", "POST", "{}".into(), None, None, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let invitation = rpc(app.clone(), "begin_account_setup", json!({})).await;
@@ -440,7 +458,7 @@ fn event_source_and_catalog_see_new_accounts_without_starting_watchers() {
         json!(["work"])
     );
     assert!(events.active().unwrap().is_empty());
-    assert!(events.workers.lock().unwrap().is_empty());
+    assert!(events.worker_count().unwrap() == 0);
 }
 
 fn connection(db: &Db) -> rusqlite::Connection {

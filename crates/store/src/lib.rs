@@ -1,6 +1,9 @@
 //! SQLite persistence; connections and transactions stay inside this crate.
+/// Implementation of accounts within this crate.
 mod accounts;
+/// Implementation of events within this crate.
 pub mod events;
+/// Implementation of oauth within this crate.
 pub mod oauth;
 use mail_bridge_core::{Error, Result, safe};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -11,17 +14,23 @@ use std::{
     time::Duration,
 };
 
+/// Compute the stable lowercase SHA-256 spelling used for token and event identities.
 pub fn hash(value: impl AsRef<[u8]>) -> String {
     format!("{:x}", Sha256::digest(value.as_ref()))
 }
+/// Read the current Unix time in seconds at the clock boundary.
 pub fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
 }
+/// SQLite store handle with a private connection and its filesystem location.
+///
+/// Semantically one shared connection plus its stable path. All SQL and transaction
+/// guards remain within this crate; callers use domain-specific persistence operations.
 #[derive(Clone)]
-pub struct Db(Arc<Mutex<Connection>>, std::path::PathBuf);
+pub struct Db(Arc<Mutex<Connection>>, Arc<Path>);
 impl Db {
     /// Filesystem location of this store (contains no credentials).
     pub fn path(&self) -> &Path {
@@ -37,6 +46,7 @@ impl Db {
         })
     }
 
+    /// Open the private SQLite store and initialize legacy-compatible account/OAuth/send tables.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(safe)?;
@@ -69,8 +79,9 @@ impl Db {
             CREATE TABLE IF NOT EXISTS attempts(id TEXT PRIMARY KEY,fingerprint TEXT,status TEXT,message_id TEXT);
             CREATE TABLE IF NOT EXISTS account_attempts(account_id TEXT,id TEXT,fingerprint TEXT,status TEXT,message_id TEXT,PRIMARY KEY(account_id,id));
             INSERT OR IGNORE INTO account_attempts SELECT 'default',id,fingerprint,status,message_id FROM attempts;").map_err(safe)?;
-        Ok(Self(Arc::new(Mutex::new(db)), path.to_owned()))
+        Ok(Self(Arc::new(Mutex::new(db)), path.into()))
     }
+    /// Atomically reserve a send request identity or return its previously committed outcome.
     pub fn attempt(
         &self,
         account_id: &str,
@@ -92,7 +103,9 @@ impl Db {
             .map_err(safe)?;
         if let Some((old, status, message)) = row {
             if old != fingerprint {
-                return Err(Error("request_id already used for different content"));
+                return Err(Error::Rejected(
+                    "request_id already used for different content",
+                ));
             }
             return Ok(Some((status, message)));
         }
@@ -110,6 +123,7 @@ impl Db {
         tx.commit().map_err(safe)?;
         Ok(None)
     }
+    /// Record SMTP acceptance for an already reserved account/request identity.
     pub fn mark_accepted(&self, account_id: &str, id: &str) -> Result<()> {
         self.0
             .lock()
@@ -121,6 +135,7 @@ impl Db {
             .map_err(safe)?;
         Ok(())
     }
+    /// Atomically remove OAuth and event state while preserving accounts and the send journal.
     pub fn revoke_oauth(&self) -> Result<()> {
         let mut db = self.0.lock().map_err(safe)?;
         let tx = db.transaction().map_err(safe)?;

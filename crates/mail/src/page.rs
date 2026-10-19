@@ -4,7 +4,7 @@
 //! | --- | --- | --- | --- | --- |
 //! | Parse page | Once per request | O(folder + query length) | Owned boxed text | Revalidate per UID window |
 //! | Inspect cursor/search | Per UID window | O(1) | Inline enum/optional criteria | Independent unchecked options |
-use mail_bridge_core::{Error, Result, clean};
+use mail_bridge_core::{Error, Result, account::Mailbox, clean};
 use serde::Deserialize;
 use serde_json::Value;
 use std::num::NonZeroU32;
@@ -15,7 +15,9 @@ use std::num::NonZeroU32;
 /// Query contains 1–256 characters without CR, LF or NUL and is not whitespace-only.
 /// Private fields encode the pair together; construction rejects unsupported keys.
 pub struct SearchCriteria {
+    /// Canonical supported IMAP search key.
     field: &'static str,
+    /// Parsed bounded search text.
     query: Box<str>,
 }
 
@@ -27,7 +29,7 @@ impl SearchCriteria {
             "FROM" => "FROM",
             "TO" => "TO",
             "TEXT" => "TEXT",
-            _ => return Err(Error("Unsupported search field")),
+            _ => return Err(Error::Rejected("Unsupported search field")),
         };
         clean(&query, 256)?;
         Ok(Self { field, query })
@@ -89,10 +91,15 @@ impl SearchCriteria {
 /// Nonzero integers exclude invalid IMAP identifiers; the Before variant cannot
 /// exist without the UIDVALIDITY that gives its UID meaning.
 enum Cursor {
+    /// Start from the current mailbox generation and newest UID.
     Latest,
+    /// Start from the newest UID within the required generation.
     InMailbox(NonZeroU32),
+    /// Continue before a nonzero UID within its required generation.
     Before {
+        /// Mailbox UIDVALIDITY; a changed value invalidates earlier UIDs.
         validity: NonZeroU32,
+        /// Message UID scoped to a mailbox generation.
         uid: NonZeroU32,
     },
 }
@@ -103,9 +110,13 @@ enum Cursor {
 /// `Some` contains both a supported field and a valid query. Folder is boxed,
 /// nonempty text with at most 512 characters and no CR/LF/NUL.
 pub struct Page {
-    folder: Box<str>,
+    /// Mailbox name parsed before any provider connection.
+    folder: Mailbox,
+    /// Validated upper bound on the number of returned entries.
     limit: u8,
+    /// Parsed generation-bound listing cursor; invalid UID combinations are unrepresentable.
     cursor: Cursor,
+    /// Optional parsed search criteria; absence denotes plain listing.
     search: Option<SearchCriteria>,
 }
 
@@ -113,13 +124,19 @@ pub struct Page {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawPage {
+    /// Mailbox name parsed before any provider connection.
     #[serde(default = "inbox")]
     folder: Box<str>,
+    /// Validated upper bound on the number of returned entries.
     #[serde(default = "default_limit")]
     limit: usize,
+    /// Exclusive external UID upper bound, requiring a matching UIDVALIDITY.
     before_uid: Option<u32>,
+    /// External mailbox generation paired with a message/cursor UID.
     uidvalidity: Option<u32>,
+    /// Canonical supported IMAP search key.
     field: Option<Box<str>>,
+    /// Parsed bounded search text.
     query: Option<Box<str>>,
 }
 
@@ -137,10 +154,11 @@ impl Page {
     /// Parse the existing JSON contract, including its operation-specific errors.
     pub fn parse(args: Value, search: bool) -> Result<Self> {
         let raw: RawPage =
-            serde_json::from_value(args).map_err(|_| Error("Invalid page arguments"))?;
-        clean(&raw.folder, 512)?;
-        let invalid =
-            Error("Invalid page; provide limit 1–20 and preserve UIDVALIDITY with before_uid");
+            serde_json::from_value(args).map_err(|_| Error::Rejected("Invalid page arguments"))?;
+        let folder = raw.folder.try_into()?;
+        let invalid = Error::Rejected(
+            "Invalid page; provide limit 1–20 and preserve UIDVALIDITY with before_uid",
+        );
         if !(1..=20).contains(&raw.limit) {
             return Err(invalid);
         }
@@ -157,23 +175,23 @@ impl Page {
             let field = raw
                 .field
                 .as_deref()
-                .ok_or(Error("Unsupported search field"))?;
+                .ok_or(Error::Rejected("Unsupported search field"))?;
             // Preserve field error precedence when both field and query are invalid.
             if !matches!(field, "SUBJECT" | "FROM" | "TO" | "TEXT") {
-                return Err(Error("Unsupported search field"));
+                return Err(Error::Rejected("Unsupported search field"));
             }
             Some(SearchCriteria::parse(
                 field,
-                raw.query.ok_or(Error("Search query missing"))?,
+                raw.query.ok_or(Error::Rejected("Search query missing"))?,
             )?)
         } else {
             if raw.field.is_some() || raw.query.is_some() {
-                return Err(Error("Use search_messages for search fields"));
+                return Err(Error::Rejected("Use search_messages for search fields"));
             }
             None
         };
         Ok(Self {
-            folder: raw.folder,
+            folder,
             limit: raw.limit as u8,
             cursor,
             search: criteria,

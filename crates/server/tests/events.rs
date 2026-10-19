@@ -3,7 +3,7 @@ mod support;
 use mail_bridge_store::{hash, now};
 use rusqlite::params;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 use support::*;
 async fn rpc(
     app: axum::Router,
@@ -37,33 +37,17 @@ async fn rpc(
 }
 #[tokio::test]
 async fn actual_mcp2026_discovery_catalog_subscribe_and_scope_challenge() {
-    let (dir, config, db, auth, _mail, _receiver, events) = setup();
-    let settings = mail_bridge_rust::config::Settings {
-        owner_password: config.owner_password,
-        public_url: config.public_url,
-        redirects: config.redirects,
-        data_dir: dir.path().to_owned(),
-        bind: "127.0.0.1:18765".parse().unwrap(),
-    };
+    let (_dir, _config, db, auth, _mail, _receiver, events) = setup();
     for (token, scope) in [("read", "mail:read"), ("send", "mail:send")] {
         connection(&db)
             .execute(
                 "INSERT INTO tokens VALUES (?,'access','owner',?,?,?)",
-                params![hash(token), auth.resource, scope, now() + 3600],
+                params![hash(token), auth.resource(), scope, now() + 3600],
             )
             .unwrap();
     }
-    let mail = Arc::new(mail_bridge_mail::service::MailService {
-        accounts: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
-        db: db.clone(),
-        gate: Arc::new(tokio::sync::Semaphore::new(1)),
-    });
-    let app = mail_bridge_rust::http::router_with_events(
-        &settings,
-        auth.clone(),
-        mail.clone(),
-        Some(events.clone()),
-    );
+    let mail = Arc::new(mail_bridge_mail::service::MailService::from_store(db.clone()).unwrap());
+    let app = mail_bridge_rust::http::router(auth.clone(), mail.clone(), Some(events.clone()));
     let (_, _, discover) = rpc(app.clone(), "server/discover", json!({}), "read").await;
     assert!(
         discover["result"]["capabilities"]["events"].is_object(),
@@ -93,7 +77,7 @@ async fn actual_mcp2026_discovery_catalog_subscribe_and_scope_challenge() {
     let (_, _, unsub) = rpc(app, "events/unsubscribe", args, "read").await;
     assert_eq!(unsub["result"], json!({}));
     assert!(events.active().unwrap().is_empty());
-    let off = mail_bridge_rust::http::router(&settings, auth, mail);
+    let off = mail_bridge_rust::http::router(auth, mail, None);
     let (_, _, discover) = rpc(off.clone(), "server/discover", json!({}), "read").await;
     assert!(discover["result"]["capabilities"].get("events").is_none());
     let (_, _, catalog) = rpc(off, "events/list", json!({}), "read").await;

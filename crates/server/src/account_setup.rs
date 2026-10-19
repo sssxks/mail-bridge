@@ -13,24 +13,36 @@ use serde_json::{Value, json};
 use std::sync::Mutex;
 use zeroize::Zeroizing;
 
+/// Private setup invitation lifetime in seconds.
 const TTL: i64 = 600;
+/// Maximum live setup invitations: eight.
 const MAX_SESSIONS: usize = 8;
 /// `Invited | Opened(csrf_hash) | Saved`.
 ///
 /// Each variant owns only its relevant immutable payload. A saved invitation
 /// cannot retain a CSRF token, and an unopened invitation cannot authorize POST.
 enum Progress {
+    /// A pending invitation that has not been opened by a browser.
     Invited,
-    Opened { csrf_hash: Box<str> },
+    /// A browser-opened invitation bound to the current CSRF hash.
+    Opened {
+        /** Hash of the current browser token; replaced whenever the form is reopened. */
+        csrf_hash: Box<str>,
+    },
+    /// A committed invitation that can no longer save an account.
     Saved,
 }
 
 /// `Client × TicketHash × Expiry × Progress`. Identity and expiry are fixed;
 /// only progress changes while the registry lock is held.
 struct Session {
+    /// OAuth client identity bound to this grant or setup invitation.
     client: Box<str>,
+    /// Hash of the private setup invitation token.
     ticket_hash: Box<str>,
+    /// Unix expiry time checked before granting or starting work.
     expires: i64,
+    /// Current invitation state; only opened invitations may commit an account.
     progress: Progress,
 }
 /// At most eight live invitations stored in insertion order.
@@ -38,6 +50,7 @@ struct Session {
 /// so two submissions cannot activate the same invitation twice.
 #[derive(Default)]
 pub struct AccountSetup {
+    /// At most eight live setup invitations in insertion order.
     sessions: Mutex<Vec<Session>>,
 }
 impl AccountSetup {
@@ -46,7 +59,9 @@ impl AccountSetup {
         let mut sessions = self.sessions.lock().map_err(safe)?;
         sessions.retain(|s| s.expires > now());
         if sessions.len() >= MAX_SESSIONS {
-            return Err(Error("Too many setup invitations; try after they expire"));
+            return Err(Error::Rejected(
+                "Too many setup invitations; try after they expire",
+            ));
         }
         let ticket = random();
         let expires = now() + TTL;
@@ -71,9 +86,9 @@ impl AccountSetup {
                     && s.expires > now()
                     && !matches!(s.progress, Progress::Saved)
             })
-            .ok_or(Error("Setup invitation unavailable or expired"))?;
+            .ok_or(Error::Rejected("Setup invitation unavailable or expired"))?;
         if !auth.setup_grant_active(&session.client)? {
-            return Err(Error("Connection authorization no longer active"));
+            return Err(Error::Rejected("Connection authorization no longer active"));
         }
         let csrf = random();
         session.progress = Progress::Opened {
@@ -113,9 +128,11 @@ impl AccountSetup {
                     && s.expires > now()
                     && !matches!(s.progress, Progress::Saved)
             })
-            .ok_or(Error("Setup invitation unavailable or expired"))?;
+            .ok_or(Error::Rejected("Setup invitation unavailable or expired"))?;
         let Progress::Opened { csrf_hash } = &session.progress else {
-            return Err(Error("Owner confirmation or browser verification failed"));
+            return Err(Error::Rejected(
+                "Owner confirmation or browser verification failed",
+            ));
         };
         if csrf.is_empty()
             || csrf != cookie
@@ -123,7 +140,9 @@ impl AccountSetup {
             || !auth.verify_owner(&owner)
             || !auth.setup_grant_active(&session.client)?
         {
-            return Err(Error("Owner confirmation or browser verification failed"));
+            return Err(Error::Rejected(
+                "Owner confirmation or browser verification failed",
+            ));
         }
         if params.keys().any(|k| {
             !matches!(
@@ -141,11 +160,11 @@ impl AccountSetup {
                     | "password"
             )
         }) {
-            return Err(Error("Unexpected setup field"));
+            return Err(Error::Rejected("Unexpected setup field"));
         }
         // Reject password reuse before removing it into the account's zeroizing storage.
         if auth.verify_owner(val(&params, "password")?) {
-            return Err(Error(
+            return Err(Error::Rejected(
                 "Mailbox credential must differ from the owner password",
             ));
         }

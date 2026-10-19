@@ -19,8 +19,11 @@ use serde_json::{Value, json};
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RawDraft {
+    /// Explicit recipients in their original order.
     pub to: Box<[Box<str>]>,
+    /// Decoded subject or validated outgoing subject, according to this representation.
     pub subject: Box<str>,
+    /// Owned outgoing content, queued JSON bytes or bounded response bytes.
     pub body: Box<str>,
 }
 
@@ -34,9 +37,12 @@ pub(super) struct RawDraft {
 /// Serialization keeps the legacy object shape used by durable send fingerprints.
 #[derive(Serialize)]
 pub(super) struct Draft {
+    /// Explicit recipients in their original order.
     #[serde(serialize_with = "serialize_recipients")]
     to: Box<[Address]>,
+    /// Decoded subject or validated outgoing subject, according to this representation.
     subject: Box<str>,
+    /// Owned outgoing content, queued JSON bytes or bounded response bytes.
     body: Box<str>,
 }
 
@@ -52,7 +58,7 @@ impl RawDraft {
     /// Enforce the request contract once, before preview, journal or SMTP access.
     pub(super) fn parse(self) -> Result<Draft> {
         if self.to.is_empty() || self.to.len() > 20 {
-            return Err(Error("Provide 1–20 explicit recipients"));
+            return Err(Error::Rejected("Provide 1–20 explicit recipients"));
         }
         let to = self
             .to
@@ -64,7 +70,7 @@ impl RawDraft {
             || self.body.chars().count() > 20000
             || self.body.contains('\0')
         {
-            return Err(Error("Body must contain 1–20000 characters"));
+            return Err(Error::Rejected("Body must contain 1–20000 characters"));
         }
         Ok(Draft {
             to,

@@ -4,7 +4,9 @@ use serde::Serialize;
 /// A decoded mailbox address, with independently optional display name/address.
 #[derive(Serialize)]
 pub struct Sender {
+    /// Decoded optional sender display name.
     name: Option<Box<str>>,
+    /// Decoded sender address, absent for incomplete/unparseable headers.
     address: Option<Box<str>>,
 }
 
@@ -12,9 +14,13 @@ pub struct Sender {
 /// Missing/unparseable headers map to null or an empty sender list.
 /// Payloads are owned because the IMAP response buffer is released after parsing.
 pub struct MessageSummary {
+    /// Message UID scoped to a mailbox generation.
     pub uid: u32,
+    /// Decoded subject or validated outgoing subject, according to this representation.
     pub subject: Option<Box<str>>,
+    /// Owned decoded senders retained after the IMAP buffer is released.
     pub from: Box<[Sender]>,
+    /// Decoded RFC3339 Date header, absent when unavailable.
     pub date: Option<Box<str>>,
 }
 impl MessageSummary {

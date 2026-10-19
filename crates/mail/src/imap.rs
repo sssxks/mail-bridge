@@ -19,7 +19,9 @@ use tokio_rustls::{
     rustls::{ClientConfig, RootCertStore, pki_types::ServerName},
 };
 
+/// Authenticated TLS IMAP session whose input is guarded before protocol allocation.
 pub type ImapSession = Session<GuardIo<TlsStream<TcpStream>>>;
+/// Escape already bounded text as an IMAP quoted argument.
 pub fn quote(raw: &str) -> Result<String> {
     clean(raw, 512)?;
     Ok(format!(
@@ -27,9 +29,11 @@ pub fn quote(raw: &str) -> Result<String> {
         raw.replace('\\', "\\\\").replace('"', "\\\"")
     ))
 }
+/// Encode a mailbox name in IMAP modified UTF-7.
 pub fn utf7_encode(value: &str) -> String {
     let mut result = String::new();
     let mut pending = Vec::<u8>::new();
+    /// Append one buffered UTF-16 segment to the modified UTF-7 output and reuse its buffer.
     fn flush(pending: &mut Vec<u8>, out: &mut String) {
         if !pending.is_empty() {
             out.push('&');
@@ -60,13 +64,16 @@ pub fn utf7_encode(value: &str) -> String {
     flush(&mut pending, &mut result);
     result
 }
+/// Decode IMAP modified UTF-7 and reject malformed encoded segments.
 pub fn utf7_decode(value: &str) -> Result<String> {
     let mut result = String::new();
     let mut rest = value;
     while let Some(index) = rest.find('&') {
         result.push_str(&rest[..index]);
         rest = &rest[index + 1..];
-        let end = rest.find('-').ok_or(Error("Invalid mailbox encoding"))?;
+        let end = rest
+            .find('-')
+            .ok_or(Error::Rejected("Invalid mailbox encoding"))?;
         if end == 0 {
             result.push('&');
         } else {
@@ -76,7 +83,7 @@ pub fn utf7_decode(value: &str) -> Result<String> {
             }
             let raw = STANDARD.decode(encoded).map_err(safe)?;
             if raw.len() % 2 != 0 {
-                return Err(Error("Invalid mailbox encoding"));
+                return Err(Error::Rejected("Invalid mailbox encoding"));
             }
             let units: Vec<u16> = raw
                 .as_chunks::<2>()
@@ -92,6 +99,7 @@ pub fn utf7_decode(value: &str) -> Result<String> {
     Ok(result)
 }
 impl RealBackend {
+    /// Open TLS/STARTTLS and authenticate with the selected parsed account credential.
     pub async fn connect(&self) -> Result<ImapSession> {
         let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         let tls = TlsConnector::from(Arc::new(
@@ -106,7 +114,7 @@ impl RealBackend {
         let client = if self.config.imap().security() == Security::Starttls {
             let mut plain = Client::new(GuardIo::new(tcp));
             if plain.read_response().await.map_err(safe)?.is_none() {
-                return Err(Error("Missing IMAP greeting"));
+                return Err(Error::Rejected("Missing IMAP greeting"));
             }
             plain
                 .run_command_and_check_ok("STARTTLS", None)
@@ -121,7 +129,7 @@ impl RealBackend {
             let mut client =
                 Client::new(GuardIo::new(tls.connect(domain, tcp).await.map_err(safe)?));
             if client.read_response().await.map_err(safe)?.is_none() {
-                return Err(Error("Missing IMAP greeting"));
+                return Err(Error::Rejected("Missing IMAP greeting"));
             }
             client
         };
@@ -129,8 +137,9 @@ impl RealBackend {
         client
             .login(&self.config.username(), self.password.as_str())
             .await
-            .map_err(|_| Error("IMAP authentication failed; details suppressed"))
+            .map_err(|_| Error::Baseline(mail_bridge_core::BaselineFailure::Authentication))
     }
+    /// Execute a typed read command on an already authenticated bounded session.
     pub async fn read_session<
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + std::fmt::Debug + Send,
     >(
@@ -148,7 +157,7 @@ impl RealBackend {
                     }
                     count += 1;
                     if count > 10000 {
-                        return Err(Error("Folder listing exceeds limit"));
+                        return Err(Error::Rejected("Folder listing exceeds limit"));
                     }
                 }
                 let has_more = folders.len() > f.limit;
@@ -163,7 +172,9 @@ impl RealBackend {
                     .await
                     .map_err(safe)?;
                 if selected.uid_validity != Some(a.validity.get()) {
-                    return Err(Error("UIDVALIDITY changed; list this folder again"));
+                    return Err(Error::Rejected(
+                        "UIDVALIDITY changed; list this folder again",
+                    ));
                 }
                 let size = {
                     let mut stream = session
@@ -176,10 +187,12 @@ impl RealBackend {
                             size = f.size;
                         }
                     }
-                    size.ok_or(Error("UID not found"))?
+                    size.ok_or(Error::Rejected("UID not found"))?
                 };
                 if size as usize > MAX_MAIL {
-                    return Err(Error("Message exceeds 2 MiB limit; use your mail client"));
+                    return Err(Error::Rejected(
+                        "Message exceeds 2 MiB limit; use your mail client",
+                    ));
                 }
                 let mut stream = session
                     // The size preflight and GuardIo bound allocation. A full PEEK
@@ -190,7 +203,7 @@ impl RealBackend {
                 let mut result = None;
                 while let Some(f) = stream.try_next().await.map_err(safe)? {
                     if f.uid == Some(a.uid.get()) {
-                        let body = f.body().ok_or(Error("Body unavailable"))?;
+                        let body = f.body().ok_or(Error::Rejected("Body unavailable"))?;
                         let mut value = parse_mail(body, true)?;
                         value["uid"] = json!(a.uid.get());
                         value["uidvalidity"] = json!(a.validity.get());
@@ -205,7 +218,7 @@ impl RealBackend {
                         result = Some(value);
                     }
                 }
-                return result.ok_or(Error("UID not found"));
+                return result.ok_or(Error::Rejected("UID not found"));
             }
             ReadCommand::Page(page) => page,
         };
@@ -216,9 +229,11 @@ impl RealBackend {
             .map_err(safe)?;
         let validity = selected
             .uid_validity
-            .ok_or(Error("Server omitted UIDVALIDITY"))?;
+            .ok_or(Error::Rejected("Server omitted UIDVALIDITY"))?;
         if a.uidvalidity().is_some_and(|v| v != validity) {
-            return Err(Error("UIDVALIDITY changed; list this folder again"));
+            return Err(Error::Rejected(
+                "UIDVALIDITY changed; list this folder again",
+            ));
         }
         let mut upper = if let Some(next) = a.before_uid().or(selected.uid_next) {
             next.saturating_sub(1)
@@ -235,7 +250,7 @@ impl RealBackend {
                     highest = Some(highest.unwrap_or(0).max(uid));
                 }
             }
-            highest.ok_or(Error(
+            highest.ok_or(Error::Rejected(
                 "Server omitted last message UID; list this folder again",
             ))?
         };
@@ -283,7 +298,7 @@ impl RealBackend {
                     let raw = fetch
                         .header()
                         .or_else(|| fetch.body())
-                        .ok_or(Error("Header unavailable"))?;
+                        .ok_or(Error::Rejected("Header unavailable"))?;
                     if candidate.is_some()
                         && a.search()
                             .is_some_and(|criteria| !criteria.matches_header(raw))
@@ -311,6 +326,7 @@ impl RealBackend {
         Ok(result)
     }
 }
+/// Issue a bounded UID search, using a synchronizing literal for UTF-8 text.
 pub async fn search<
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + std::fmt::Debug + Send,
 >(
@@ -341,7 +357,7 @@ pub async fn search<
         match response.parsed() {
             Response::Continue(_) => {
                 if sent {
-                    return Err(Error("Unexpected continuation"));
+                    return Err(Error::Rejected("Unexpected continuation"));
                 }
                 session.run_command_untagged(query).await.map_err(safe)?;
                 sent = true;
@@ -353,10 +369,10 @@ pub async fn search<
                 if *status == Status::Ok && sent {
                     return Ok(found);
                 }
-                return Err(Error("Server rejected UTF-8 search"));
+                return Err(Error::Rejected("Server rejected UTF-8 search"));
             }
             _ => {}
         }
     }
-    Err(Error("Search response incomplete"))
+    Err(Error::Rejected("Search response incomplete"))
 }

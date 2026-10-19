@@ -7,36 +7,38 @@ use mail_bridge_core::{
 };
 use zeroize::Zeroizing;
 
+/// Decode a bounded HTTP form and reject duplicate or oversized fields.
 pub fn form(raw: &[u8]) -> Result<Params> {
     let pairs: Vec<(String, String)> =
-        serde_urlencoded::from_bytes(raw).map_err(|_| Error("invalid_request"))?;
+        serde_urlencoded::from_bytes(raw).map_err(|_| Error::Rejected("invalid_request"))?;
     if pairs.len() > 30 {
-        return Err(Error("invalid_request"));
+        return Err(Error::Rejected("invalid_request"));
     }
     let mut result = Params::new();
     for (k, v) in pairs {
         if v.len() > 8192 || result.insert(k, v).is_some() {
-            return Err(Error("invalid_request"));
+            return Err(Error::Rejected("invalid_request"));
         }
     }
     Ok(result)
 }
+/// Parse private mailbox setup fields into an account whose components enforce their constraints.
 pub fn from_form(mut params: Params) -> Result<AccountSettings> {
     let password = Zeroizing::new(params.remove("password").unwrap_or_default());
     let id = val(&params, "account_id")?.to_owned();
     let name = val(&params, "name")?.to_owned();
     let email = val(&params, "email")?.to_owned();
-    mail_bridge_core::address(&email)?;
     let username = params
         .get("username")
         .filter(|s| !s.is_empty())
         .cloned()
         .unwrap_or_else(|| email.clone());
+    /// Decode the external TLS mode, rejecting plaintext or unknown values.
     fn security(value: &str) -> Result<Security> {
         match value {
             "tls" => Ok(Security::Tls),
             "starttls" => Ok(Security::Starttls),
-            _ => Err(Error("TLS or STARTTLS required")),
+            _ => Err(Error::Rejected("TLS or STARTTLS required")),
         }
     }
     let smtp_host = params.get("smtp_host").cloned().unwrap_or_default();

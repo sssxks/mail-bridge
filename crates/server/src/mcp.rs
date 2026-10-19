@@ -4,16 +4,40 @@ use rmcp::{ErrorData, RoleServer, ServerHandler, model::*, service::RequestConte
 use serde_json::{Value, json};
 use std::sync::{Arc, LazyLock};
 
+/// HTTP request extension containing a parsed compact mail-permission set.
 #[derive(Clone)]
-pub struct Scopes(pub Vec<String>);
+pub struct Scopes(pub mail_bridge_core::scope::Scopes);
+/// HTTP request extension containing the authenticated OAuth client identity.
 #[derive(Clone)]
-pub struct Principal(pub String);
+pub struct Principal(pub Box<str>);
+/// MCP adapter dependency product `Setup × Mail × Auth × OptionalEvents`.
+/// Only construction assembles dependencies; requests cannot replace the services.
 #[derive(Clone)]
 pub struct Mcp {
-    pub setup: Arc<crate::account_setup::AccountSetup>,
-    pub mail: Arc<MailService>,
-    pub auth: Arc<Auth>,
-    pub events: Option<Arc<mail_bridge_events::Events>>,
+    /// Shared private account-setup invitation service.
+    setup: Arc<crate::account_setup::AccountSetup>,
+    /// Mail service used by HTTP and MCP adapters.
+    mail: Arc<MailService>,
+    /// Authorization service used to resolve current grants.
+    auth: Arc<Auth>,
+    /// Optional event service; absence disables event discovery and operations.
+    events: Option<Arc<mail_bridge_events::Events>>,
+}
+impl Mcp {
+    /// Assemble immutable adapter dependencies before exposing the handler.
+    pub(crate) fn new(
+        setup: Arc<crate::account_setup::AccountSetup>,
+        mail: Arc<MailService>,
+        auth: Arc<Auth>,
+        events: Option<Arc<mail_bridge_events::Events>>,
+    ) -> Self {
+        Self {
+            setup,
+            mail,
+            auth,
+            events,
+        }
+    }
 }
 /// Fixed tool catalog, initialized once and shared for the process lifetime.
 /// Listing clones the catalog; lookup scans eight entries and clones only the match.
@@ -89,6 +113,7 @@ pub static TOOLS: LazyLock<[Tool; 8]> = LazyLock::new(|| {
     })
 });
 impl ServerHandler for Mcp {
+    /// Adapt authenticated event discovery and subscription operations to MCP errors.
     async fn on_custom_request(
         &self,
         request: CustomRequest,
@@ -120,7 +145,7 @@ impl ServerHandler for Mcp {
             .ok_or_else(|| {
                 ErrorData::new(ErrorCode(-32024), "Authenticated principal required", None)
             })?;
-        let permitted = scopes.is_some_and(|s| s.iter().any(|v| v == "mail:read"));
+        let permitted = scopes.is_some_and(|s| s.contains(mail_bridge_core::scope::Scope::Read));
         if !permitted {
             return Err(ErrorData::new(
                 ErrorCode(-32024),
@@ -188,9 +213,11 @@ impl ServerHandler for Mcp {
         };
         Ok(CustomResult::new(value))
     }
+    /// Advertise the MCP tool capability.
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
     }
+    /// Return the fixed tool catalog.
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
@@ -198,9 +225,11 @@ impl ServerHandler for Mcp {
     ) -> std::result::Result<ListToolsResult, ErrorData> {
         Ok(ListToolsResult::with_all_items(TOOLS.to_vec()))
     }
+    /// Find one named entry in the fixed eight-tool catalog.
     fn get_tool(&self, name: &str) -> Option<Tool> {
         TOOLS.iter().find(|tool| tool.name == name).cloned()
     }
+    /// Check the required permission and dispatch account setup or a parsed mail operation.
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
@@ -215,7 +244,13 @@ impl ServerHandler for Mcp {
             .extensions
             .get::<axum::http::request::Parts>()
             .and_then(|p| p.extensions.get::<Scopes>())
-            .is_some_and(|scopes| scopes.0.iter().any(|s| s == scope));
+            .is_some_and(|scopes| {
+                scopes.0.contains(if scope == "mail:send" {
+                    mail_bridge_core::scope::Scope::Send
+                } else {
+                    mail_bridge_core::scope::Scope::Read
+                })
+            });
         if !allowed {
             let mut result = CallToolResult::error(vec![ContentBlock::text(
                 "Authorize the required mail scope.",
@@ -236,9 +271,9 @@ impl ServerHandler for Mcp {
                 .and_then(|p| p.extensions.get::<Principal>());
             match client {
                 Some(client) if args.as_object().is_some_and(|v| v.is_empty()) => {
-                    self.setup.begin(&client.0, &self.auth.base)
+                    self.setup.begin(&client.0, self.auth.base())
                 }
-                _ => Err(mail_bridge_core::Error(
+                _ => Err(mail_bridge_core::Error::Rejected(
                     "Invalid setup arguments or missing authenticated connection",
                 )),
             }
@@ -247,12 +282,13 @@ impl ServerHandler for Mcp {
         };
         let result = match outcome {
             Ok(value) => CallToolResult::success(vec![ContentBlock::text(value.to_string())]),
-            Err(error) => CallToolResult::error(vec![ContentBlock::text(error.0)]),
+            Err(error) => CallToolResult::error(vec![ContentBlock::text(error.message())]),
         };
         Ok(result.into())
     }
 }
 
+/// Translate the event error category into its MCP wire representation.
 fn event_rpc(error: mail_bridge_events::subscription::EventError) -> ErrorData {
     ErrorData::new(
         ErrorCode(error.code),

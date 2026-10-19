@@ -12,13 +12,19 @@ use std::{
     time::Duration,
 };
 
+/// Static callback failure category; provider response details are never retained.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CallbackError(pub &'static str);
+/// HTTP callback result product `Status × BoundedBody`, owned until verification/delivery finishes.
 pub struct Reply {
+    /// HTTP status returned by the callback.
     pub status: u16,
+    /// Owned outgoing content, queued JSON bytes or bounded response bytes.
     pub body: Vec<u8>,
 }
+/// Webhook boundary preserving signed wire bytes and returning only bounded safe results.
 pub trait Transport: Send + Sync {
+    /// Send a bounded webhook request while preserving the exact signed bytes.
     fn post<'a>(
         &'a self,
         url: &'a str,
@@ -26,21 +32,29 @@ pub trait Transport: Send + Sync {
         body: Vec<u8>,
     ) -> BoxFuture<'a, std::result::Result<Reply, CallbackError>>;
 }
-pub fn key(secret: &str) -> Result<Vec<u8>> {
-    let raw = secret
-        .strip_prefix("whsec_")
-        .ok_or(Error("Invalid webhook signing secret"))?;
-    let bytes = STANDARD
-        .decode(raw)
-        .or_else(|_| STANDARD_NO_PAD.decode(raw))
-        .map_err(|_| Error("Invalid webhook signing secret"))?;
-    if !(24..=64).contains(&bytes.len()) {
-        return Err(Error("Invalid webhook signing secret"));
+/// Decoded webhook HMAC key of 24–64 bytes, erased on drop.
+/// Only parsing may construct the private immutable allocation.
+#[derive(Clone)]
+pub struct SigningKey(zeroize::Zeroizing<Box<[u8]>>);
+impl SigningKey {
+    /// Parse an external representation once before the resulting value enters business code.
+    pub fn parse(secret: &str) -> Result<Self> {
+        let raw = secret
+            .strip_prefix("whsec_")
+            .ok_or(Error::Rejected("Invalid webhook signing secret"))?;
+        let bytes = STANDARD
+            .decode(raw)
+            .or_else(|_| STANDARD_NO_PAD.decode(raw))
+            .map_err(|_| Error::Rejected("Invalid webhook signing secret"))?;
+        if !(24..=64).contains(&bytes.len()) {
+            return Err(Error::Rejected("Invalid webhook signing secret"));
+        }
+        Ok(Self(zeroize::Zeroizing::new(bytes.into_boxed_slice())))
     }
-    Ok(bytes)
 }
-pub fn signature(secret: &str, id: &str, timestamp: i64, body: &[u8]) -> Result<String> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key(secret)?).map_err(mail_bridge_core::safe)?;
+/// Sign canonical authorization fields or exact webhook bytes with the selected key.
+fn signature(secret: &SigningKey, id: &str, timestamp: i64, body: &[u8]) -> Result<String> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(&secret.0).map_err(mail_bridge_core::safe)?;
     mac.update(format!("{id}.{timestamp}.").as_bytes());
     mac.update(body);
     Ok(format!(
@@ -48,9 +62,10 @@ pub fn signature(secret: &str, id: &str, timestamp: i64, body: &[u8]) -> Result<
         STANDARD.encode(mac.finalize().into_bytes())
     ))
 }
-pub fn headers(
-    secret: &str,
-    previous: Option<&str>,
+/// Construct webhook headers using the current key and optional rotation-overlap key.
+pub(crate) fn headers(
+    secret: &SigningKey,
+    previous: Option<&SigningKey>,
     id: &str,
     subscription: &str,
     body: &[u8],
@@ -69,34 +84,52 @@ pub fn headers(
         ("X-MCP-Subscription-Id".into(), subscription.into()),
     ])
 }
-pub fn callback_url(raw: &str) -> Result<url::Url> {
-    clean(raw, 2048)?;
-    let url = url::Url::parse(raw).map_err(|_| Error("Invalid callback URL"))?;
-    if url.scheme() != "https"
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
-        || url.port_or_known_default() != Some(443)
-    {
-        return Err(Error(
-            "Callback must be an HTTPS URL on port 443 without credentials or fragment",
-        ));
+/// HTTPS callback on port 443 with a host and no credentials/fragment.
+/// The private URL preserves these parse-time invariants; DNS is checked per connection.
+pub struct Callback(url::Url);
+impl Callback {
+    /// Parse an external representation once before the resulting value enters business code.
+    pub fn parse(raw: &str) -> Result<Self> {
+        clean(raw, 2048)?;
+        let url = url::Url::parse(raw).map_err(|_| Error::Rejected("Invalid callback URL"))?;
+        if url.scheme() != "https"
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+            || url.port_or_known_default() != Some(443)
+        {
+            return Err(Error::Rejected(
+                "Callback must be an HTTPS URL on port 443 without credentials or fragment",
+            ));
+        }
+        if let Some(host) = url.host_str()
+            && let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>()
+            && !public_ip(ip)
+        {
+            return Err(Error::Rejected("Callback is not publicly routable"));
+        }
+        Ok(Self(url))
     }
-    if let Some(host) = url.host_str()
-        && let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>()
-        && !public_ip(ip)
-    {
-        return Err(Error("Callback is not publicly routable"));
+
+    /// Borrow the canonical callback URL for identity and transport.
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
     }
-    Ok(url)
+    /// Borrow the host guaranteed by parsing.
+    pub fn host(&self) -> &str {
+        self.0.host_str().expect("callback owns a parsed host")
+    }
 }
+/// Test membership in the configured IPv4 prefix.
 fn v4_prefix(ip: Ipv4Addr, base: [u8; 4], bits: u32) -> bool {
     u32::from(ip) >> (32 - bits) == u32::from(Ipv4Addr::from(base)) >> (32 - bits)
 }
+/// Test membership in the configured IPv6 prefix.
 fn v6_prefix(ip: Ipv6Addr, base: u128, bits: u32) -> bool {
     u128::from(ip) >> (128 - bits) == base >> (128 - bits)
 }
+/// Apply the explicit publicly routable address policy before pinning a connection.
 pub fn public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => ![
@@ -127,8 +160,10 @@ pub fn public_ip(ip: IpAddr) -> bool {
         }
     }
 }
+/// Stateless HTTPS delivery implementation with per-connection address validation and pinning.
 pub struct HttpsTransport;
 impl Transport for HttpsTransport {
+    /// Send a bounded webhook request while preserving the exact signed bytes.
     fn post<'a>(
         &'a self,
         raw: &'a str,
@@ -136,12 +171,8 @@ impl Transport for HttpsTransport {
         body: Vec<u8>,
     ) -> BoxFuture<'a, std::result::Result<Reply, CallbackError>> {
         Box::pin(async move {
-            let url = callback_url(raw).map_err(|_| CallbackError("invalid_url"))?;
-            let host = url
-                .host_str()
-                .ok_or(CallbackError("invalid_url"))?
-                .trim_matches(['[', ']'])
-                .to_owned();
+            let callback = Callback::parse(raw).map_err(|_| CallbackError("invalid_url"))?;
+            let host = callback.host().trim_matches(['[', ']']).to_owned();
             let addresses: Vec<_> = tokio::time::timeout(
                 Duration::from_secs(5),
                 tokio::net::lookup_host((host.as_str(), 443)),
@@ -167,7 +198,7 @@ impl Transport for HttpsTransport {
                 .resolve_to_addrs(&host, &addresses)
                 .build()
                 .map_err(|_| CallbackError("tls_error"))?;
-            let mut request = client.post(url).body(body);
+            let mut request = client.post(callback.0).body(body);
             for (name, value) in headers {
                 request = request.header(name, value);
             }

@@ -1,12 +1,22 @@
 //! Scan scheduling, bounded outbox insertion and webhook delivery workers.
+//!
+//! | Operation | Frequency | Complexity | Storage | Forbidden implementation |
+//! | --- | --- | --- | --- | --- |
+//! | Normalize scan | Source response | O(m log m), m <= source window | In-place UID ordering | Multiple events for one UID |
+//! | Queue payloads | Scan commit | O(fitting payload bytes) | Lazy iterator under transaction | Render a full queue again |
+//! | Supervise | Once per second | O(s + grant/source lookups), s <= 2 | Existing cancellation map | Delete on lookup failure |
 use crate::{EVENT, Events, audit, date, webhook};
 use mail_bridge_core::{Error, Result, safe};
-use mail_bridge_store::{events::PendingEvent, hash, now};
+use mail_bridge_store::{
+    events::{DeliveryOutcome, PendingEvent},
+    hash, now,
+};
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 impl Events {
+    /// Fetch a bounded header window and atomically queue events with cursor advancement.
     pub async fn scan_once(&self, id: &str) -> Result<()> {
         let Some(sub) = self.get(id)? else {
             return Ok(());
@@ -26,7 +36,7 @@ impl Events {
             self.source.scan(&sub.filters, sub.validity, sub.uid),
         )
         .await
-        .map_err(|_| Error("Event upstream timeout"))??;
+        .map_err(|_| Error::Rejected("Event upstream timeout"))??;
         let mut messages = scan.messages;
         messages.retain(|message| message.uid > sub.uid);
         messages.sort_unstable_by_key(|message| message.uid);
@@ -37,18 +47,19 @@ impl Events {
             let event = format!("evt_{stable}");
             let body = serde_json::to_vec(&json!({"eventId":event,"name":EVENT,"timestamp":date(now()),"data":{"account_id":sub.filters.account_id,"mailbox":sub.filters.mailbox,"message_id":format!("imap_{stable}"),"uidvalidity":scan.validity,"uid":uid,"subject":message.subject,"from":message.from,"date":message.date},"cursor":null})).map_err(safe)?;
             Ok(PendingEvent {uid,id:event,body})
-        }).collect::<Result<Vec<_>>>()?;
+        });
         if self.db.enqueue_scan(
             id,
             (sub.validity, sub.uid),
             (scan.validity, scan.next_uid),
             scan.scanned_to,
-            &messages,
+            messages,
         )? {
             audit("scan", "queued", "new_uid");
         }
         Ok(())
     }
+    /// Deliver one due event and persist its typed acknowledgement/retry/pause result.
     pub async fn deliver_once(&self, id: &str) -> Result<bool> {
         let Some(sub) = self.get(id)? else {
             return Ok(false);
@@ -70,7 +81,7 @@ impl Events {
         } = item;
         let headers = webhook::headers(
             &sub.secret,
-            sub.previous.as_deref().filter(|_| sub.rotate_until > now()),
+            sub.previous.as_ref().filter(|_| sub.rotate_until > now()),
             &event,
             id,
             &body,
@@ -93,27 +104,34 @@ impl Events {
             Ok(_) => (false, false, "http_4xx"),
             Err(error) => (false, true, error.0),
         };
-        let failure = if accepted {
-            None
+        let outcome = if accepted {
+            DeliveryOutcome::Accepted
+        } else if retry {
+            match attempts.next_retry() {
+                Some(attempt) => DeliveryOutcome::Retry {
+                    attempt,
+                    at: now() + attempts.backoff(),
+                    reason,
+                },
+                None => DeliveryOutcome::Paused { reason },
+            }
         } else {
-            let count = if retry { attempts + 1 } else { 5 };
-            let backoff = [1, 4, 16, 60, 300][attempts.min(4) as usize];
-            Some((count, now() + backoff, reason))
+            DeliveryOutcome::Paused { reason }
         };
-        self.db.finish_delivery(id, &event, failure)?;
+        let status = match &outcome {
+            DeliveryOutcome::Accepted => "accepted",
+            DeliveryOutcome::Retry { .. } => "retry",
+            DeliveryOutcome::Paused { .. } => "paused",
+        };
+        self.db.finish_delivery(id, &event, outcome)?;
         audit(
             "deliver",
-            if accepted {
-                "accepted"
-            } else if failure.is_some_and(|f| f.0 >= 5) {
-                "paused"
-            } else {
-                "retry"
-            },
+            status,
             if accepted { "http_2xx" } else { reason },
         );
         Ok(true)
     }
+    /// Supervise subscription workers until cancellation, preserving state on lookup failures.
     pub fn start(self: Arc<Self>, shutdown: CancellationToken) {
         tokio::spawn(async move {
             loop {
@@ -178,17 +196,18 @@ impl Events {
                         loop {
                             let work = async {
                                 service.scan_once(&sub.id).await?;
-                                let current =
-                                    service.get(&sub.id)?.ok_or(Error("Subscription ended"))?;
+                                let current = service
+                                    .get(&sub.id)?
+                                    .ok_or(Error::Rejected("Subscription ended"))?;
                                 if current.paused {
-                                    return Err(Error("Subscription paused"));
+                                    return Err(Error::Rejected("Subscription paused"));
                                 }
                                 tokio::time::timeout(
                                     Duration::from_secs(40),
                                     service.source.wait(&current.filters),
                                 )
                                 .await
-                                .map_err(|_| Error("Event wait timeout"))?
+                                .map_err(|_| Error::Rejected("Event wait timeout"))?
                             };
                             let result =
                                 tokio::select! {_ = cancel.cancelled()=>break,result=work=>result};

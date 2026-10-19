@@ -50,7 +50,9 @@ impl Mail {
 impl Source for Mail {
     fn available(&self, a: &str) -> Result<bool> {
         if self.fail_available.load(Ordering::SeqCst) {
-            return Err(mail_bridge_core::Error("Synthetic source lookup failure"));
+            return Err(mail_bridge_core::Error::Rejected(
+                "Synthetic source lookup failure",
+            ));
         }
         Ok(self.state.lock().unwrap().contains_key(a))
     }
@@ -58,16 +60,18 @@ impl Source for Mail {
         Box::pin(async move {
             self.snapshots.fetch_add(1, Ordering::SeqCst);
             if self.fail_snapshot.load(Ordering::SeqCst) {
-                return Err(mail_bridge_core::Error("Missing UIDVALIDITY"));
+                return Err(mail_bridge_core::Error::Baseline(
+                    mail_bridge_core::BaselineFailure::MissingValidity,
+                ));
             }
-            let (validity, next_uid) = self.state.lock().unwrap()[&f.account_id];
+            let (validity, next_uid) = self.state.lock().unwrap()[f.account_id.as_str()];
             Ok(Snapshot { validity, next_uid })
         })
     }
     fn scan<'a>(&'a self, f: &'a Filters, v: u32, uid: u32) -> BoxFuture<'a, Result<Scan>> {
         Box::pin(async move {
             self.scans.fetch_add(1, Ordering::SeqCst);
-            let (validity, next_uid) = self.state.lock().unwrap()[&f.account_id];
+            let (validity, next_uid) = self.state.lock().unwrap()[f.account_id.as_str()];
             Ok(Scan {
                 validity,
                 next_uid,
@@ -152,13 +156,13 @@ pub fn setup() -> TestSetup {
             "test-owner-placeholder-0000000000000000".into(),
         )),
         public_url: "https://mail.example.com".into(),
-        redirects: vec![],
+        redirects: vec![].into(),
     };
-    let auth = Arc::new(Auth::new(&settings, db.clone()));
+    let auth = Arc::new(Auth::new(&settings, db.clone()).unwrap());
     connection(&db)
         .execute(
             "INSERT INTO tokens VALUES (?,'refresh','owner',?,'mail:read',?)",
-            params![hash("mock-refresh"), auth.resource, now() + 86400],
+            params![hash("mock-refresh"), auth.resource(), now() + 86400],
         )
         .unwrap();
     let source = Arc::new(Mail::default());
