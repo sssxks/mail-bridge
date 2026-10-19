@@ -113,6 +113,9 @@ cargo build --locked --release
 The Cargo workspace has six crates. See [crate boundaries and development](docs/architecture.md)
 for responsibilities, dependency direction and focused test commands. The server
 remains the default workspace member and its executable is `mail-bridge-rust`.
+Mail commands are parsed before provider access. Immutable account configuration
+and typed OAuth/event state enforce internal constraints while preserving the
+existing account database, MCP arguments and send journal format.
 
 Browser and migration regression from the repository root:
 
