@@ -2,7 +2,7 @@
 use mail_bridge_auth::{Params, val};
 use mail_bridge_core::{
     Error, Result,
-    account::{AccountSettings, Config, MailboxCredential, Security, validate},
+    account::{Account, AccountName, AccountSettings, MailboxCredential, RawConfig, Security},
     safe,
 };
 use zeroize::Zeroizing;
@@ -46,26 +46,28 @@ pub fn from_form(mut params: Params) -> Result<AccountSettings> {
         val(&params, "smtp_port")?.parse().map_err(safe)?
     };
     let account = AccountSettings {
-        id,
-        name,
-        config: Config {
-            username,
-            from_address: email,
-            imap_host: val(&params, "imap_host")?.to_owned(),
-            imap_port: val(&params, "imap_port")?.parse().map_err(safe)?,
-            imap_security: security(val(&params, "imap_security")?)?,
-            smtp_host,
-            smtp_port,
-            smtp_security: security(
-                params
-                    .get("smtp_security")
-                    .map(String::as_str)
-                    .unwrap_or("tls"),
-            )?,
-            smtp_enabled: false,
-        },
+        id: id.parse::<Account>()?,
+        name: AccountName::parse(name.into())?,
+        config: std::sync::Arc::new(
+            RawConfig {
+                username: username.into(),
+                from_address: email.into(),
+                imap_host: val(&params, "imap_host")?.into(),
+                imap_port: val(&params, "imap_port")?.parse().map_err(safe)?,
+                imap_security: security(val(&params, "imap_security")?)?,
+                smtp_host: smtp_host.into(),
+                smtp_port,
+                smtp_security: security(
+                    params
+                        .get("smtp_security")
+                        .map(String::as_str)
+                        .unwrap_or("tls"),
+                )?,
+                smtp_enabled: false,
+            }
+            .try_into()?,
+        ),
         password: MailboxCredential::parse(password)?,
     };
-    validate(&account)?;
     Ok(account)
 }

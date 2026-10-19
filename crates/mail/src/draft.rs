@@ -84,9 +84,9 @@ impl Draft {
 
     /// Move validated recipients into the message; sender parsing and MIME
     /// construction remain fallible at the transport boundary.
-    pub(super) fn message(self, from: &str, id: &str) -> Result<Message> {
+    pub(super) fn message(self, from: &Address, id: &str) -> Result<Message> {
         let mut message = Message::builder()
-            .from(Mailbox::new(None, address(from)?))
+            .from(Mailbox::new(None, from.clone()))
             .subject(self.subject.as_ref())
             .message_id(Some(id.to_owned()))
             .header(ContentType::TEXT_PLAIN);
@@ -113,7 +113,10 @@ mod tests {
         preview["status"] = json!("preview_only_not_saved_or_sent");
         assert_eq!(draft.preview(), preview);
         let message = draft
-            .message("sender@example.com", "<test@example.com>")
+            .message(
+                &address("sender@example.com").unwrap(),
+                "<test@example.com>",
+            )
             .unwrap();
         assert_eq!(message.envelope().to().len(), 3);
     }

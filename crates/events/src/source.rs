@@ -135,9 +135,7 @@ impl ImapSource {
     fn account(&self, id: &str) -> Result<RealBackend> {
         let account = self
             .db
-            .runtime_accounts()?
-            .into_iter()
-            .find(|a| a.id == id)
+            .runtime_account(id)?
             .ok_or(Error("Account unavailable for events"))?;
         Ok(RealBackend {
             config: account.config,

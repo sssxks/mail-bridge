@@ -8,17 +8,21 @@ use mail_bridge_core::{Error, Result, account::Security, safe};
 use std::time::Duration;
 
 pub(crate) async fn send(backend: &RealBackend, message: Message) -> Result<()> {
-    let builder = if backend.config.smtp_security == Security::Tls {
-        AsyncSmtpTransport::<Tokio1Executor>::relay(&backend.config.smtp_host)
+    let endpoint = backend
+        .config
+        .smtp()
+        .ok_or(Error("SMTP is disabled for this account"))?;
+    let builder = if endpoint.security() == Security::Tls {
+        AsyncSmtpTransport::<Tokio1Executor>::relay(endpoint.host())
     } else {
-        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&backend.config.smtp_host)
+        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(endpoint.host())
     }
     .map_err(safe)?;
     let transport = builder
-        .port(backend.config.smtp_port)
+        .port(endpoint.port())
         .timeout(Some(Duration::from_secs(20)))
         .credentials(Credentials::new(
-            backend.config.username.clone(),
+            backend.config.username().to_owned(),
             backend.password.as_str().to_owned(),
         ))
         .build();

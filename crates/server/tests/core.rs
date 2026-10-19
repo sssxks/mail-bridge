@@ -8,11 +8,12 @@ use lettre::Message;
 use mail_bridge_auth::{Auth, Params};
 use mail_bridge_core::{
     Error, Result,
-    account::{Config, Security},
+    account::{Config, RawConfig, Security},
 };
 use mail_bridge_mail::{
     backend::{Backend, RealBackend},
     bounded_io::GuardIo,
+    command::ReadCommand,
     imap::{search, utf7_decode, utf7_encode},
     mime::parse_mail,
     page::{Page, SearchCriteria},
@@ -38,7 +39,7 @@ struct Fake {
     fail: AtomicBool,
 }
 impl Backend for Fake {
-    fn read<'a>(&'a self, _: &'a str, _: Value) -> BoxFuture<'a, Result<Value>> {
+    fn read(&self, _: ReadCommand) -> BoxFuture<'_, Result<Value>> {
         Box::pin(async { Err(Error("Mock read is not connected")) })
     }
     fn send(&self, _: Message) -> BoxFuture<'_, Result<()>> {
@@ -52,8 +53,8 @@ impl Backend for Fake {
         })
     }
 }
-fn mock_config() -> Config {
-    Config {
+fn mock_config() -> RawConfig {
+    RawConfig {
         username: "mock@example.com".into(),
         from_address: "mock@example.com".into(),
         imap_host: "imap.example.com".into(),
@@ -84,7 +85,7 @@ fn setup() -> (tempfile::TempDir, Settings, Db, Arc<Fake>, Arc<MailService>) {
     let account = MailAccount {
         id: "qq".into(),
         name: "Mock QQ".into(),
-        config: mock_config(),
+        config: Arc::new(mock_config().try_into().unwrap()),
         backend: Some(fake.clone()),
         credential_status: "ready",
         concurrency: Default::default(),
@@ -104,7 +105,7 @@ struct SlowBackend {
     release: tokio::sync::Semaphore,
 }
 impl Backend for SlowBackend {
-    fn read<'a>(&'a self, _: &'a str, _: Value) -> BoxFuture<'a, Result<Value>> {
+    fn read(&self, _: ReadCommand) -> BoxFuture<'_, Result<Value>> {
         Box::pin(async move {
             self.started.send("read").unwrap();
             self.release.acquire().await.unwrap().forget();
@@ -379,7 +380,7 @@ async fn missing_uidnext_uses_bounded_uid_fetch() {
             fetch(4096, "HEADER", RAW),
         ])
         .await;
-        let page = RealBackend::read_session(&mut session, name, args)
+        let page = RealBackend::read_session(&mut session, ReadCommand::parse(name, args).unwrap())
             .await
             .unwrap();
         assert_eq!(page["messages"][0]["uid"], 4096);
@@ -394,9 +395,12 @@ async fn missing_uidnext_uses_bounded_uid_fetch() {
         ),
     ])
     .await;
-    let page = RealBackend::read_session(&mut session, "list_messages", json!({}))
-        .await
-        .unwrap();
+    let page = RealBackend::read_session(
+        &mut session,
+        ReadCommand::parse("list_messages", json!({})).unwrap(),
+    )
+    .await
+    .unwrap();
     assert_eq!(page["messages"], json!([]));
     assert!(page["next_before_uid"].is_null());
     handle.await.unwrap();
@@ -410,9 +414,12 @@ async fn missing_uidnext_uses_bounded_uid_fetch() {
     ])
     .await;
     assert!(
-        RealBackend::read_session(&mut session, "list_messages", json!({}))
-            .await
-            .is_err()
+        RealBackend::read_session(
+            &mut session,
+            ReadCommand::parse("list_messages", json!({})).unwrap()
+        )
+        .await
+        .is_err()
     );
     handle.await.unwrap();
 }
@@ -429,9 +436,12 @@ async fn uid_pages_and_readonly_peek() {
         fetch(10, "HEADER", RAW),
     ];
     let (mut session, handle) = mock_imap(script).await;
-    let page = RealBackend::read_session(&mut session, "list_messages", json!({"limit":2}))
-        .await
-        .unwrap();
+    let page = RealBackend::read_session(
+        &mut session,
+        ReadCommand::parse("list_messages", json!({"limit":2})).unwrap(),
+    )
+    .await
+    .unwrap();
     assert_eq!(page["messages"][0]["uid"], 30);
     assert_eq!(page["messages"][1]["uid"], 10);
     assert_eq!(page["next_before_uid"], 10);
@@ -449,8 +459,7 @@ async fn uid_pages_and_readonly_peek() {
     let (mut session, handle) = mock_imap(script).await;
     let page = RealBackend::read_session(
         &mut session,
-        "list_messages",
-        json!({"before_uid":10,"uidvalidity":77}),
+        ReadCommand::parse("list_messages", json!({"before_uid":10,"uidvalidity":77})).unwrap(),
     )
     .await
     .unwrap();
@@ -475,8 +484,7 @@ async fn body_size_uidvalidity_and_utf8_search() {
     let (mut session, handle) = mock_imap(script).await;
     let mail = RealBackend::read_session(
         &mut session,
-        "read_message",
-        json!({"uid":10,"uidvalidity":77}),
+        ReadCommand::parse("read_message", json!({"uid":10,"uidvalidity":77})).unwrap(),
     )
     .await
     .unwrap();
@@ -486,8 +494,7 @@ async fn body_size_uidvalidity_and_utf8_search() {
     assert!(
         RealBackend::read_session(
             &mut session,
-            "read_message",
-            json!({"uid":10,"uidvalidity":77})
+            ReadCommand::parse("read_message", json!({"uid":10,"uidvalidity":77})).unwrap()
         )
         .await
         .is_err()
@@ -539,8 +546,7 @@ async fn full_body_read_reports_inaccurate_size_metadata_without_hiding_content(
     .await;
     let message = RealBackend::read_session(
         &mut session,
-        "read_message",
-        json!({"uid":10,"uidvalidity":1}),
+        ReadCommand::parse("read_message", json!({"uid":10,"uidvalidity":1})).unwrap(),
     )
     .await
     .unwrap();
@@ -574,8 +580,11 @@ async fn domain_search_uses_broader_candidates_and_filters_header_false_positive
     .await;
     let result = RealBackend::read_session(
         &mut session,
-        "search_messages",
-        json!({"field":"FROM","query":"sender.example","limit":2,"uidvalidity":77}),
+        ReadCommand::parse(
+            "search_messages",
+            json!({"field":"FROM","query":"sender.example","limit":2,"uidvalidity":77}),
+        )
+        .unwrap(),
     )
     .await
     .unwrap();
@@ -605,8 +614,11 @@ async fn empty_provider_index_search_is_explicitly_not_exhaustive() {
     .await;
     let result = RealBackend::read_session(
         &mut session,
-        "search_messages",
-        json!({"field":"SUBJECT","query":"absent"}),
+        ReadCommand::parse(
+            "search_messages",
+            json!({"field":"SUBJECT","query":"absent"}),
+        )
+        .unwrap(),
     )
     .await
     .unwrap();
@@ -664,14 +676,15 @@ async fn durable_send_dedup_and_ambiguous_failure() {
         "unknown_do_not_retry"
     );
     assert_eq!(fake.sent.load(Ordering::SeqCst), 2);
+    let mut raw = mock_config();
+    raw.smtp_enabled = false;
     service
         .accounts
         .write()
         .unwrap()
         .get_mut("qq")
         .unwrap()
-        .config
-        .smtp_enabled = false;
+        .config = Arc::new(raw.try_into().unwrap());
     assert!(service.dispatch("send_email", args).await.is_err());
     let _permit = service.gate.acquire().await.unwrap();
     assert!(
@@ -1210,9 +1223,11 @@ async fn two_account_sender_and_request_id_isolation() {
     account.id = "zju".into();
     account.concurrency = Default::default();
     account.name = "Mock ZJU".into();
-    account.config.username = "school@zju.example".into();
-    account.config.from_address = "school@zju.example".into();
-    account.config.smtp_port = 994;
+    let mut raw = mock_config();
+    raw.username = "school@zju.example".into();
+    raw.from_address = "school@zju.example".into();
+    raw.smtp_port = 994;
+    account.config = Arc::new(raw.try_into().unwrap());
     account.backend = Some(zju.clone());
     service
         .accounts

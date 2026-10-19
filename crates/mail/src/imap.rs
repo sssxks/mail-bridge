@@ -2,14 +2,14 @@
 use crate::{
     backend::RealBackend,
     bounded_io::{GuardIo, MAX_MAIL},
+    command::ReadCommand,
     mime::parse_mail,
-    page::{Page, SearchCriteria},
+    page::SearchCriteria,
 };
 use async_imap::{Client, Session};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::TryStreamExt;
 use mail_bridge_core::{Error, Result, account::Security, clean, safe};
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc};
 use tokio::net::TcpStream;
@@ -91,13 +91,6 @@ pub fn utf7_decode(value: &str) -> Result<String> {
     result.push_str(rest);
     Ok(result)
 }
-fn inbox() -> String {
-    "INBOX".into()
-}
-fn default_limit() -> usize {
-    10
-}
-
 impl RealBackend {
     pub async fn connect(&self) -> Result<ImapSession> {
         let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -106,11 +99,11 @@ impl RealBackend {
                 .with_root_certificates(roots)
                 .with_no_client_auth(),
         ));
-        let domain = ServerName::try_from(self.config.imap_host.clone()).map_err(safe)?;
-        let tcp = TcpStream::connect((self.config.imap_host.as_str(), self.config.imap_port))
+        let domain = ServerName::try_from(self.config.imap().host().to_owned()).map_err(safe)?;
+        let tcp = TcpStream::connect((self.config.imap().host(), self.config.imap().port()))
             .await
             .map_err(safe)?;
-        let client = if self.config.imap_security == Security::Starttls {
+        let client = if self.config.imap().security() == Security::Starttls {
             let mut plain = Client::new(GuardIo::new(tcp));
             if plain.read_response().await.map_err(safe)?.is_none() {
                 return Err(Error("Missing IMAP greeting"));
@@ -134,7 +127,7 @@ impl RealBackend {
         };
         // The library quotes credentials; no credentials appear in a URL or log.
         client
-            .login(&self.config.username, self.password.as_str())
+            .login(&self.config.username(), self.password.as_str())
             .await
             .map_err(|_| Error("IMAP authentication failed; details suppressed"))
     }
@@ -142,106 +135,81 @@ impl RealBackend {
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + std::fmt::Debug + Send,
     >(
         session: &mut Session<T>,
-        name: &str,
-        args: Value,
+        command: ReadCommand,
     ) -> Result<Value> {
-        if name == "list_folders" {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct F {
-                #[serde(default)]
-                offset: usize,
-                #[serde(default = "default_limit")]
-                limit: usize,
-            }
-            let f: F =
-                serde_json::from_value(args).map_err(|_| Error("Invalid folder arguments"))?;
-            if f.offset > 10000 || !(1..=100).contains(&f.limit) {
-                return Err(Error("Invalid folder page"));
-            }
-            let mut names = session.list(None, Some("*")).await.map_err(safe)?;
-            let mut count = 0;
-            let mut folders = Vec::new();
-            while let Some(name) = names.try_next().await.map_err(safe)? {
-                if count >= f.offset && folders.len() <= f.limit {
-                    folders.push(utf7_decode(name.name())?);
+        let command = match command {
+            ReadCommand::Folders(f) => {
+                let mut names = session.list(None, Some("*")).await.map_err(safe)?;
+                let mut count = 0;
+                let mut folders = Vec::new();
+                while let Some(name) = names.try_next().await.map_err(safe)? {
+                    if count >= f.offset && folders.len() <= f.limit {
+                        folders.push(utf7_decode(name.name())?);
+                    }
+                    count += 1;
+                    if count > 10000 {
+                        return Err(Error("Folder listing exceeds limit"));
+                    }
                 }
-                count += 1;
-                if count > 10000 {
-                    return Err(Error("Folder listing exceeds limit"));
-                }
+                let has_more = folders.len() > f.limit;
+                folders.truncate(f.limit);
+                return Ok(
+                    json!({"folders":folders,"next_offset":if has_more{Some(f.offset+f.limit)}else{None}}),
+                );
             }
-            let has_more = folders.len() > f.limit;
-            folders.truncate(f.limit);
-            return Ok(
-                json!({"folders":folders,"next_offset":if has_more{Some(f.offset+f.limit)}else{None}}),
-            );
-        }
-        if name == "read_message" {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct Read {
-                #[serde(default = "inbox")]
-                folder: String,
-                uid: u32,
-                uidvalidity: u32,
-            }
-            let a: Read =
-                serde_json::from_value(args).map_err(|_| Error("Invalid UID arguments"))?;
-            clean(&a.folder, 512)?;
-            if a.uid == 0 || a.uidvalidity == 0 {
-                return Err(Error("Invalid UID or UIDVALIDITY"));
-            }
-            let selected = session
-                .examine(utf7_encode(&a.folder))
-                .await
-                .map_err(safe)?;
-            if selected.uid_validity != Some(a.uidvalidity) {
-                return Err(Error("UIDVALIDITY changed; list this folder again"));
-            }
-            let size = {
-                let mut stream = session
-                    .uid_fetch(a.uid.to_string(), "(UID RFC822.SIZE)")
+            ReadCommand::Message(a) => {
+                let selected = session
+                    .examine(utf7_encode(&a.folder))
                     .await
                     .map_err(safe)?;
-                let mut size = None;
+                if selected.uid_validity != Some(a.validity.get()) {
+                    return Err(Error("UIDVALIDITY changed; list this folder again"));
+                }
+                let size = {
+                    let mut stream = session
+                        .uid_fetch(a.uid.to_string(), "(UID RFC822.SIZE)")
+                        .await
+                        .map_err(safe)?;
+                    let mut size = None;
+                    while let Some(f) = stream.try_next().await.map_err(safe)? {
+                        if f.uid == Some(a.uid.get()) {
+                            size = f.size;
+                        }
+                    }
+                    size.ok_or(Error("UID not found"))?
+                };
+                if size as usize > MAX_MAIL {
+                    return Err(Error("Message exceeds 2 MiB limit; use your mail client"));
+                }
+                let mut stream = session
+                    // The size preflight and GuardIo bound allocation. A full PEEK
+                    // has an explicit complete literal, unlike a requested prefix.
+                    .uid_fetch(a.uid.to_string(), "(UID BODY.PEEK[])")
+                    .await
+                    .map_err(safe)?;
+                let mut result = None;
                 while let Some(f) = stream.try_next().await.map_err(safe)? {
-                    if f.uid == Some(a.uid) {
-                        size = f.size;
+                    if f.uid == Some(a.uid.get()) {
+                        let body = f.body().ok_or(Error("Body unavailable"))?;
+                        let mut value = parse_mail(body, true)?;
+                        value["uid"] = json!(a.uid.get());
+                        value["uidvalidity"] = json!(a.validity.get());
+                        value["reported_size_bytes"] = json!(size);
+                        value["received_size_bytes"] = json!(body.len());
+                        value["size_metadata_mismatch"] = json!(body.len() != size as usize);
+                        if body.len() != size as usize {
+                            value["size_warning"] = json!(
+                                "Provider RFC822.SIZE differs from the full IMAP literal. Body was fetched in full; verify critical details against the original message if content appears incomplete."
+                            );
+                        }
+                        result = Some(value);
                     }
                 }
-                size.ok_or(Error("UID not found"))?
-            };
-            if size as usize > MAX_MAIL {
-                return Err(Error("Message exceeds 2 MiB limit; use your mail client"));
+                return result.ok_or(Error("UID not found"));
             }
-            let mut stream = session
-                // The size preflight and GuardIo bound allocation. A full PEEK
-                // has an explicit complete literal, unlike a requested prefix.
-                .uid_fetch(a.uid.to_string(), "(UID BODY.PEEK[])")
-                .await
-                .map_err(safe)?;
-            let mut result = None;
-            while let Some(f) = stream.try_next().await.map_err(safe)? {
-                if f.uid == Some(a.uid) {
-                    let body = f.body().ok_or(Error("Body unavailable"))?;
-                    let mut value = parse_mail(body, true)?;
-                    value["uid"] = json!(a.uid);
-                    value["uidvalidity"] = json!(a.uidvalidity);
-                    value["reported_size_bytes"] = json!(size);
-                    value["received_size_bytes"] = json!(body.len());
-                    value["size_metadata_mismatch"] = json!(body.len() != size as usize);
-                    if body.len() != size as usize {
-                        value["size_warning"] = json!(
-                            "Provider RFC822.SIZE differs from the full IMAP literal. Body was fetched in full; verify critical details against the original message if content appears incomplete."
-                        );
-                    }
-                    result = Some(value);
-                }
-            }
-            return result.ok_or(Error("UID not found"));
-        }
-        let a = Page::parse(args, name == "search_messages")?;
+            ReadCommand::Page(page) => page,
+        };
+        let a = command;
         let selected = session
             .examine(utf7_encode(a.folder()))
             .await

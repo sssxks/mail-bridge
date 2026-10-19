@@ -1,4 +1,5 @@
 //! Mail provider interface and real account transport.
+use crate::command::ReadCommand;
 use futures_util::future::BoxFuture;
 use lettre::Message;
 use mail_bridge_core::{
@@ -6,21 +7,22 @@ use mail_bridge_core::{
     account::{Config, MailboxCredential},
 };
 use serde_json::Value;
+use std::sync::Arc;
 
 pub trait Backend: Send + Sync {
-    fn read<'a>(&'a self, name: &'a str, args: Value) -> BoxFuture<'a, Result<Value>>;
+    fn read(&self, command: ReadCommand) -> BoxFuture<'_, Result<Value>>;
     fn send(&self, message: Message) -> BoxFuture<'_, Result<()>>;
 }
 #[derive(Clone)]
 pub struct RealBackend {
-    pub config: Config,
+    pub config: Arc<Config>,
     pub password: MailboxCredential,
 }
 impl Backend for RealBackend {
-    fn read<'a>(&'a self, name: &'a str, args: Value) -> BoxFuture<'a, Result<Value>> {
+    fn read(&self, command: ReadCommand) -> BoxFuture<'_, Result<Value>> {
         Box::pin(async move {
             let mut session = self.connect().await?;
-            let value = Self::read_session(&mut session, name, args).await;
+            let value = Self::read_session(&mut session, command).await;
             let _ = session.logout().await;
             value
         })

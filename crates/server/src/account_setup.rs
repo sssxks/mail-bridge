@@ -150,7 +150,7 @@ impl AccountSetup {
             ));
         }
         let account = crate::form::from_form(params)?;
-        let id = account.id.clone();
+        let id = account.id.as_str().to_owned();
         mail.add_account(account)?;
         session.progress = Progress::Saved;
         Ok(id)

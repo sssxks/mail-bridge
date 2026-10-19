@@ -1,56 +1,241 @@
+//! Parsed mailbox accounts and transport configuration.
+//!
+//! | Operation | Frequency | Complexity | Storage | Forbidden implementation |
+//! | --- | --- | --- | --- | --- |
+//! | Parse | Setup/load | O(text bytes) | Immutable boxed fields | Revalidate in business code |
+//! | Snapshot | Each operation | O(1) | Shared immutable config | Clone every config string |
 use crate::{Error, Result, clean};
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use serde::{Deserialize, Serialize, Serializer};
+use std::{borrow::Borrow, num::NonZeroU16, sync::Arc};
 use zeroize::Zeroizing;
 
+/// Account identity: `[a-z0-9_-]{1,32}` stored verbatim as immutable UTF-8.
+/// Private encoding excludes empty, oversized and noncanonical identities.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "Box<str>", into = "Box<str>")]
+pub struct Account(Box<str>);
+impl TryFrom<Box<str>> for Account {
+    type Error = Error;
+    fn try_from(value: Box<str>) -> Result<Self> {
+        if value.is_empty()
+            || value.len() > 32
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+        {
+            return Err(Error("Invalid account ID"));
+        }
+        Ok(Self(value))
+    }
+}
+impl std::str::FromStr for Account {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self> {
+        Box::<str>::from(s).try_into()
+    }
+}
+impl From<Account> for Box<str> {
+    fn from(v: Account) -> Self {
+        v.0
+    }
+}
+impl Borrow<str> for Account {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+impl Account {
+    /// Borrow the canonical identity.
+    #[inline(always)]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Nonblank display name, at most 80 Unicode characters, without CR/LF/NUL.
+/// The private boxed string is the original accepted text.
+#[derive(Clone, Serialize)]
+pub struct AccountName(Box<str>);
+impl AccountName {
+    /// Parse an external display name once.
+    pub fn parse(value: Box<str>) -> Result<Self> {
+        clean(&value, 80)?;
+        Ok(Self(value))
+    }
+    /// Borrow the display name.
+    #[inline(always)]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// TLS negotiation required by a configured mail endpoint.
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Security {
+    /// TLS before protocol greeting.
+    Tls,
+    /// Upgrade an initial connection with STARTTLS.
+    Starttls,
+}
+
+/// `DNSName × NonzeroPort × Security` with a bare ASCII DNS hostname.
+/// Private fields exclude malformed labels and zero ports.
+#[derive(Clone)]
+pub struct Endpoint {
+    host: Box<str>,
+    port: NonZeroU16,
+    security: Security,
+}
+impl Endpoint {
+    fn parse(host: Box<str>, port: u16, security: Security) -> Result<Self> {
+        if host.len() > 253
+            || host.split('.').any(|part| {
+                part.is_empty()
+                    || part.len() > 63
+                    || part.starts_with('-')
+                    || part.ends_with('-')
+                    || !part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            })
+        {
+            return Err(Error("Use a bare DNS mail hostname"));
+        }
+        Ok(Self {
+            host,
+            port: NonZeroU16::new(port).ok_or(Error("Invalid port"))?,
+            security,
+        })
+    }
+    /// Borrow the validated DNS hostname.
+    #[inline(always)]
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+    /// Nonzero network port.
+    #[inline(always)]
+    pub fn port(&self) -> u16 {
+        self.port.get()
+    }
+    /// Required TLS mode.
+    #[inline(always)]
+    pub fn security(&self) -> Security {
+        self.security
+    }
+}
+/// `Unconfigured | Disabled(endpoint) | Enabled(endpoint)`.
+/// Configured endpoints always contain a nonzero port and valid hostname.
+#[derive(Clone)]
+enum Smtp {
+    Unconfigured(Security),
+    Disabled(Endpoint),
+    Enabled(Endpoint),
+}
+
+/// Untrusted legacy storage/form representation, parsed into `Config` once.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Config {
-    pub username: String,
-    pub from_address: String,
-    pub imap_host: String,
+pub struct RawConfig {
+    pub username: Box<str>,
+    pub from_address: Box<str>,
+    pub imap_host: Box<str>,
     pub imap_port: u16,
     pub imap_security: Security,
-    pub smtp_host: String,
+    pub smtp_host: Box<str>,
     pub smtp_port: u16,
     pub smtp_security: Security,
     #[serde(default)]
     pub smtp_enabled: bool,
 }
-#[derive(Clone, Copy, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum Security {
-    Tls,
-    Starttls,
+/// `Username × SenderAddress × ImapEndpoint × SmtpState`.
+/// Text is immutable, addresses are parsed, and cross-field SMTP constraints
+/// are encoded by the private enum. Serde preserves the legacy database shape.
+#[derive(Clone, Deserialize)]
+#[serde(try_from = "RawConfig")]
+pub struct Config {
+    username: Box<str>,
+    from_address: lettre::Address,
+    imap: Endpoint,
+    smtp: Smtp,
+}
+impl TryFrom<RawConfig> for Config {
+    type Error = Error;
+    fn try_from(raw: RawConfig) -> Result<Self> {
+        clean(&raw.username, 254)?;
+        let from_address = crate::address(&raw.from_address)?;
+        let imap = Endpoint::parse(raw.imap_host, raw.imap_port, raw.imap_security)?;
+        let smtp = if raw.smtp_host.is_empty() {
+            if raw.smtp_enabled {
+                return Err(Error("Invalid port"));
+            }
+            Smtp::Unconfigured(raw.smtp_security)
+        } else {
+            let endpoint = Endpoint::parse(raw.smtp_host, raw.smtp_port, raw.smtp_security)?;
+            if raw.smtp_enabled {
+                Smtp::Enabled(endpoint)
+            } else {
+                Smtp::Disabled(endpoint)
+            }
+        };
+        Ok(Self {
+            username: raw.username,
+            from_address,
+            imap,
+            smtp,
+        })
+    }
 }
 impl Config {
-    pub fn validate(&self) -> Result<()> {
-        for value in [&self.username, &self.from_address, &self.imap_host] {
-            clean(value, 254)?;
+    /// Mailbox login name.
+    #[inline(always)]
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+    /// Parsed sender address, preserving original spelling.
+    #[inline(always)]
+    pub fn sender(&self) -> &lettre::Address {
+        &self.from_address
+    }
+    /// Borrow the parsed sender spelling.
+    pub fn sender_text(&self) -> &str {
+        self.from_address.as_ref()
+    }
+    /// Read endpoint, always configured.
+    #[inline(always)]
+    pub fn imap(&self) -> &Endpoint {
+        &self.imap
+    }
+    /// Configured submission endpoint, including disabled configurations.
+    #[inline(always)]
+    pub fn smtp(&self) -> Option<&Endpoint> {
+        match &self.smtp {
+            Smtp::Disabled(e) | Smtp::Enabled(e) => Some(e),
+            Smtp::Unconfigured(_) => None,
         }
-        for host in std::iter::once(&self.imap_host)
-            .chain((!self.smtp_host.is_empty() || self.smtp_enabled).then_some(&self.smtp_host))
-        {
-            if host.len() > 253
-                || host.split('.').any(|part| {
-                    part.is_empty()
-                        || part.len() > 63
-                        || part.starts_with('-')
-                        || part.ends_with('-')
-                        || !part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-                })
-            {
-                return Err(Error("Use a bare DNS mail hostname"));
-            }
-        }
-        if self.imap_port == 0
-            || ((!self.smtp_host.is_empty() || self.smtp_enabled) && self.smtp_port == 0)
-            || (self.smtp_enabled && self.smtp_host.is_empty())
-        {
-            return Err(Error("Invalid port"));
-        }
-        crate::address(&self.from_address)?;
-        Ok(())
+    }
+    /// Whether this account permits SMTP submission.
+    #[inline(always)]
+    pub fn sending_enabled(&self) -> bool {
+        matches!(self.smtp, Smtp::Enabled(_))
+    }
+}
+impl Serialize for Config {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut out = serializer.serialize_struct("Config", 9)?;
+        out.serialize_field("username", self.username())?;
+        out.serialize_field("from_address", self.sender_text())?;
+        out.serialize_field("imap_host", self.imap.host())?;
+        out.serialize_field("imap_port", &self.imap.port())?;
+        out.serialize_field("imap_security", &self.imap.security())?;
+        out.serialize_field("smtp_host", self.smtp().map_or("", Endpoint::host))?;
+        out.serialize_field("smtp_port", &self.smtp().map_or(0, Endpoint::port))?;
+        let security = match self.smtp {
+            Smtp::Unconfigured(s) => s,
+            Smtp::Disabled(ref e) | Smtp::Enabled(ref e) => e.security(),
+        };
+        out.serialize_field("smtp_security", &security)?;
+        out.serialize_field("smtp_enabled", &self.sending_enabled())?;
+        out.end()
     }
 }
 /// A nonempty mailbox password of at most 1024 bytes, excluding CR, LF and NUL.
@@ -108,31 +293,12 @@ mod credential_tests {
     }
 }
 
-/// Stored account DTO: identity, display name, transport configuration and credential.
-///
-/// Every persisted account has a parsed credential; missing credentials belong
-/// to runtime availability state, not to this storage representation. Other fields
-/// are validated at the configuration/persistence boundary.
+/// Parsed account product: identity, display name, immutable config and credential.
+/// Each component enforces its own constraints; no whole-account revalidation is needed.
 #[derive(Clone)]
 pub struct AccountSettings {
-    pub id: String,
-    pub name: String,
-    pub config: Config,
+    pub id: Account,
+    pub name: AccountName,
+    pub config: Arc<Config>,
     pub password: MailboxCredential,
-}
-pub fn valid_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 32
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-}
-
-pub fn validate(account: &AccountSettings) -> Result<()> {
-    if !valid_id(&account.id) {
-        return Err(Error("Invalid account ID"));
-    }
-    crate::clean(&account.name, 80)?;
-    account.config.validate()?;
-    Ok(())
 }
