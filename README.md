@@ -283,3 +283,22 @@ These checks use synthetic credentials and repository-local test state. The brow
 test uses an isolated profile and checks OAuth, private-form submission, immediate
 account visibility and restart persistence without connecting to a real mailbox
 or sending email.
+
+For Codex, request an additional send grant with:
+
+```bash
+uv run scripts/authorize-mail-send.py --server-url https://mail.example.com/mcp
+```
+
+The helper finds Codex on PATH or in the Windows desktop installation; use
+`--codex PATH` to select an executable. Complete consent in the browser. Private
+CLI output stays in the ignored `.research/send-authorization/` directory.
+
+## License and history
+
+Licensed under the [MIT License](LICENSE).
+
+Before initial publication, Git history was rewritten to remove private deployment
+records and replace personal email addresses and service identifiers. Development
+commits, their order and timestamps were retained. Some commits containing only
+private records are now empty.

@@ -3,7 +3,13 @@
 /target/
 /data/
 /dist/
+/releases/
+/.research/
+/.crate-split/
+/.publish-audit/
 .env
+.env.*
+!.env.example
 config.json
 *password*
 *.sqlite3*

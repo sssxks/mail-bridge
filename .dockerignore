@@ -1,6 +1,8 @@
 target
 data
 .env
+.env.*
+!.env.example
 config.json
 *password*
 *.sqlite3*
@@ -10,3 +12,6 @@ tests
 dist
 releases
 .research
+.crate-split
+.publish-audit
+.event-debug-work
