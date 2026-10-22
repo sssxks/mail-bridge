@@ -7,6 +7,7 @@ resolver = "3"
 version = "0.4.0"
 edition = "2024"
 rust-version = "1.88"
+license = "MIT"
 
 [workspace.dependencies]
 axum = "0.8"
